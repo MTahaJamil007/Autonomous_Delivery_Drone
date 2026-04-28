@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Drone Command Center</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" />
+    <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
+
+    <style>
+        body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
+        #map { height: 85vh; width: 100vw; }
+        #panel { height: 15vh; padding: 10px; background: #222; color: white; text-align: center; }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #28a745; color: white; border: none; border-radius: 5px; margin: 5px; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        .instructions { font-size: 14px; color: #aaa; margin-top: 5px; }
+    </style>
+</head>
+<body>
+    <div id="panel">
+        <h2 id="status" style="margin: 5px 0;">Status: Awaiting Dispatch</h2>
+        <button id="dispatchBtn" disabled>Dispatch Drone</button>
+        <button id="resetBtn" onclick="location.reload()">Reset Map</button>
+        <div class="instructions">Use the Search Bar (Top Right) to find an address, then CLICK the map to drop the Pickup and Drop-off pads.</div>
+    </div>
+    <div id="map"></div>
+
+    <script>
+        // 1. Dual Map Layers (Free & High-Res)
+        var satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 });
+        var streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 });
+
+        // Initialize Map
+        var map = L.map('map', {
+            center: [30.0315, 72.3140], // University coordinates
+            zoom: 17,
+            layers: [satelliteLayer] // Default to satellite
+        });
+
+        // Layer Toggle Control (Top Right)
+        L.control.layers({ "Satellite View": satelliteLayer, "Street Map": streetLayer }).addTo(map);
+
+        // Address Search Bar
+        var geocoder = L.Control.geocoder({
+            defaultMarkGeocode: false,
+            placeholder: "Search address or city..."
+        }).addTo(map);
+
+        // Move map when address is found
+        geocoder.on('markgeocode', function(e) {
+            map.fitBounds(e.geocode.bbox);
+        });
+
+        // Pin Dropping Logic
+        var pickupMarker = null;
+        var dropMarker = null;
+
+        // Custom Drone Icon
+        var droneIcon = L.icon({
+            iconUrl: 'data:image/svg+xml;charset=UTF-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2248%22 height=%2248%22 viewBox=%220 0 48 48%22%3E%3Cg fill=%22none%22 stroke=%22%2300d1ff%22 stroke-width=%223%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22M24 16v16M16 24h16%22/%3E%3Cpath d=%22M12 12l5 5M36 12l-5 5M12 36l5-5M36 36l-5-5%22/%3E%3Ccircle cx=%2224%22 cy=%2224%22 r=%226%22 fill=%22%2300d1ff%22 stroke=%22%2300d1ff%22/%3E%3Ccircle cx=%2212%22 cy=%2212%22 r=%223%22 fill=%22%2300d1ff%22 stroke=%22%2300d1ff%22/%3E%3Ccircle cx=%2236%22 cy=%2212%22 r=%223%22 fill=%22%2300d1ff%22 stroke=%22%2300d1ff%22/%3E%3Ccircle cx=%2212%22 cy=%2236%22 r=%223%22 fill=%22%2300d1ff%22 stroke=%22%2300d1ff%22/%3E%3Ccircle cx=%2236%22 cy=%2236%22 r=%223%22 fill=%22%2300d1ff%22 stroke=%22%2300d1ff%22/%3E%3C/g%3E%3C/svg%3E',
+            iconSize: [22, 22],
+            iconAnchor: [11, 11],
+            popupAnchor: [0, -20]
+        });
+
+        // Spawn immediately so the drone is visible even before the first GPS update
+        var liveDroneMarker = L.marker([30.0315, 72.3140], { icon: droneIcon, zIndexOffset: 1000 })
+            .addTo(map)
+            .bindPopup("Live Drone Tracking");
+
+        map.on('click', function(e) {
+            if (!pickupMarker) {
+                pickupMarker = L.marker(e.latlng).addTo(map).bindPopup("Pickup (ArUco Spawns Here)").openPopup();
+            } else if (!dropMarker) {
+                dropMarker = L.marker(e.latlng).addTo(map).bindPopup("Drop-off (ArUco Spawns Here)").openPopup();
+                document.getElementById('dispatchBtn').disabled = false;
+            }
+        });
+
+        // Dispatch Logic
+        document.getElementById('dispatchBtn').onclick = function() {
+            var payload = {
+                pickup_lat: pickupMarker.getLatLng().lat, pickup_lon: pickupMarker.getLatLng().lng,
+                drop_lat: dropMarker.getLatLng().lat, drop_lon: dropMarker.getLatLng().lng
+            };
+            fetch('/dispatch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            this.disabled = true;
+        };
+
+        // Live Drone Tracking
+        var ws = new WebSocket("ws://" + window.location.host + "/ws");
+        ws.onmessage = function(event) {
+            var data = JSON.parse(event.data);
+            document.getElementById('status').innerText = "Status: " + data.status;
+            if (data.lat !== 0.0 && data.lon !== 0.0) {
+                liveDroneMarker.setLatLng([data.lat, data.lon]);
+            }
+        };
+    </script>
+</body>
+</html>
