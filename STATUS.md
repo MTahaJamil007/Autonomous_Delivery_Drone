@@ -31,8 +31,8 @@ literally.
 | Behaviour | State | Verified by |
 | --- | --- | --- |
 | 3-leg delivery mission ends in FSM `DONE`, job `COMPLETED` | 🛫 | `test_the_full_happy_path_reaches_done` (FSM path); ACCEPTANCE § 4 (flight) |
-| Precision landing on ArUco 0/1/2 with disambiguation | 🛫 | `test_select_target_never_returns_the_wrong_marker`, `test_two_markers_appear_in_one_frame_with_distinct_ids`; ACCEPTANCE § 7 (flight) |
-| LiDAR reactive dodging with time hysteresis | ✅ | `test_replay_clear_dodge_escalate_clear_without_wall_clock`, `test_hysteresis_band_keeps_dodging` |
+| Precision landing on ArUco 0/1/2 with disambiguation | 🛫 | `test_select_target_never_returns_the_wrong_marker`, `test_two_markers_appear_in_one_frame_with_distinct_ids`; **live acquisition confirmed 23 Aug** (marker 0 decoded from the real camera at 6 m — the behaviour that had never once worked); the 20-landing gate is ACCEPTANCE § 7 |
+| LiDAR reactive dodging with time hysteresis | ✅ | `test_replay_clear_dodge_escalate_clear_without_wall_clock`, `test_hysteresis_band_keeps_dodging`; live at 10 Hz with no self-returns (ACCEPTANCE § 2, 23 Aug) |
 | Obstacle escalation after 12 s triggers detour planning | ✅ | `test_replay_...` (emission), `test_a_known_obstacle_changes_the_planned_route` (planning); ACCEPTANCE § 10 (flight) |
 | Battery monitoring gates each leg | ✅ | `test_gate_@18%` in `battery.check_leg_battery`; call site in `DroneMission.fly_leg` |
 | Safety supervisor: heartbeat + geofence, direct authority | ✅ | `test_dispatch_lifecycle` + the three P3.5 defect checks; instantiated in `DroneMission.prepare` |
@@ -47,13 +47,37 @@ tracking the airframe, three drones actually flying at once. Marking them ✅ on
 the strength of the unit tests would be the exact error this document exists to
 prevent.
 
+### What has been confirmed against a running simulator
+
+A live session on 23 Aug 2026 verified the parts of the chain that unit tests
+cannot reach. Logged in [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) § 9:
+
+- **The vendored sensors work (F2).** The drone spawned from `sim/models/` with
+  camera and LiDAR present, independent of the PX4 submodule.
+- **Topics are model-scoped (F7).** Live names matched `sim_topics` character for
+  character. No absolute `/camera/image` anywhere.
+- **The pad decodes (F1).** `pad_0` spawned, the drone climbed to 6 m, and the
+  live camera reported **marker ID 0 and nothing else** across 46 frames. This is
+  the single behaviour that had never worked in this system's history.
+- **Preflight passes for real** — all six checks, including live camera and scan
+  geometry against `config.py`.
+- **No LiDAR self-returns** — 10.0 Hz, `eff_front_m` constant at 15.0 m.
+- **`udp://` connects where `udpin://` hung forever** (see the MAVSDK note below).
+
+One measurement corrected the plan's arithmetic: the pad textures' white quiet
+zone means the decoder sees only 79.6% of the plane, so the F3 budget was ~20%
+optimistic. This *strengthens* F3 — marker-corrected, the original 0.5 m pad was
+below the decode threshold at **every** altitude the mission would have searched
+from, not merely marginal at 5 m. `config.decodable_px_at_altitude()` applies the
+measured factor.
+
 ---
 
 ## Test suite
 
 ```
 $ scripts/test.sh
-124 passed, 3 deselected in ~37 s
+126 passed, 3 deselected in ~37 s
 ```
 
 The 3 deselected are `@pytest.mark.sitl` scenarios, excluded by `pytest.ini`
@@ -82,7 +106,7 @@ causes:
 | `test_dispatch_endtoend.py` | 3 | Real HTTP dispatch with no autopilot |
 | `test_perception_contracts.py` | 16 | Replay, self-hit masking, both sensor schemas |
 | `test_mission_core.py` | 30 | Per-drone state, setpoint stream, leg wiring, PX4 params |
-| `test_landing_control.py` | 21 | Altitude-invariant gain, descent cone, marker budget |
+| `test_landing_control.py` | 23 | Altitude-invariant gain, descent cone, marker budget |
 | `test_detour_memory.py` | 18 | Dedupe, placement, persistence, confidence merge |
 | `test_fleet_isolation.py` | 16 | Every shared resource is per-drone |
 

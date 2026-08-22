@@ -136,6 +136,51 @@ blur, oblique viewing angles and lighting variation. Either alone is fragile.
 `config.PAD_SIZE_M` and `sim/models/pad_N/model.sdf` must agree; asserted by
 `tests/test_landing_control.py::test_config_pad_size_matches_the_shipped_model`.
 
+### The quiet zone costs 20% of the budget — measured
+
+The table above is the width of the **plane**. The ArUco decoder only sees the
+black marker, and the pad textures carry a white quiet zone (which is the entire
+reason they decode at all — see F1 below). Measured on the shipped textures:
+
+```
+$ python3 -c "
+import cv2
+img = cv2.imread('sim/models/pad_0/aruco_0.png')
+d = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50),
+                            cv2.aruco.DetectorParameters())
+print(d.detectMarkers(img)[0][0][0])"
+
+marker side 199 px of a 250 px texture  ->  79.6%
+```
+
+So `config.MARKER_QUIET_ZONE_FRACTION = 0.796`, and
+`config.decodable_px_at_altitude()` is the function to compare against
+`MARKER_MIN_DECODE_PX`:
+
+| Altitude | Plane | Decodable marker | 0.5 m pad, decodable |
+| --- | --- | --- | --- |
+| 10 m | 55.4 px | **44.1 px** | 11.0 px |
+| 6 m | 92.4 px | **73.5 px** | 18.4 px |
+| 3 m | 184.8 px | **147.1 px** | 36.8 px |
+
+**This correction strengthens F3 rather than weakening it.** On plane widths the
+original 0.5 m pad looked merely "marginal at 5 m" (27.7 px). Marker-corrected it
+is **22.1 px at 5 m — below the threshold at every altitude the mission would
+have searched from.** The shipped 2 m pad clears it even at full cruise altitude.
+
+### Confirmed in flight, 23 Aug 2026
+
+Taken during the remediation, over `pad_0` in the `delivery` world:
+
+| Altitude | Predicted (plane) | Predicted (marker) | **Measured** |
+| --- | --- | --- | --- |
+| 5.51 m | 100.6 px | 80.1 px | **88.6 px** |
+
+The measurement sits between the two and closer to the marker-corrected figure,
+which is what the correction predicts. First acquisition happened at 2.0 m during
+the climb at 219 px. Only marker ID 0 was ever reported — the correct pad.
+Pinned by `test_flight_measured_marker_size_matches_the_corrected_budget`.
+
 ### ArUco decodability, measured
 
 Verified with OpenCV 4.13.0 against all 27 predefined dictionaries:

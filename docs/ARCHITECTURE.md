@@ -191,6 +191,16 @@ The documented flow — arrive at `TARGET_ALT`, then search — therefore could 
 lock even with a decodable texture. **Both** levers are applied, because either
 alone is fragile: 2 m pads *and* a descent to `SEARCH_ALT_M` before searching.
 
+**The figures above are plane widths, and the decoder sees less.** The pad
+textures carry a white quiet zone — the reason they decode at all — so the black
+marker is 79.6% of the plane (measured: 199 px of a 250 px texture).
+`config.decodable_px_at_altitude()` applies that factor, and it is the function
+to compare against `MARKER_MIN_DECODE_PX`. Marker-corrected, the shipped pad is
+44 px at cruise altitude, and the original 0.5 m pad is **below the threshold at
+every altitude the mission would have searched from** — not merely marginal.
+Confirmed in flight at 5.51 m: 88.6 px measured against an 80.1 px
+marker-corrected prediction. See [CALIBRATION.md](CALIBRATION.md) § 3.
+
 `config.PAD_SIZE_M` must match `sim/models/pad_N/model.sdf`, and
 `config.CAMERA_*` must match `sim/models/x500_delivery/model.sdf`. Both pairs
 are asserted by `tests/test_landing_control.py`, and `scripts/preflight.py`

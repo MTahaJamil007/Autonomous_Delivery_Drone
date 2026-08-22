@@ -210,11 +210,40 @@ which is realistic for a delivery pad and gives about 4x margin (finding F3).
 
 
 def marker_px_at_altitude(altitude_m: float, pad_size_m: float = PAD_SIZE_M) -> float:
-    """Apparent marker width in pixels at a given altitude."""
+    """Apparent width in pixels of a pad of side `pad_size_m` at `altitude_m`.
+
+    This is the width of the whole PLANE. For what the ArUco decoder actually
+    sees, use decodable_px_at_altitude() -- the quiet zone means the marker is
+    only MARKER_QUIET_ZONE_FRACTION of this.
+    """
     if altitude_m <= 0.0:
         return float("inf")
     return CAMERA_FX_PX * pad_size_m / altitude_m
 
+
+def decodable_px_at_altitude(altitude_m: float, pad_size_m: float = PAD_SIZE_M) -> float:
+    """Apparent width of the DECODABLE marker, excluding its quiet zone.
+
+    This is the number to compare against MARKER_MIN_DECODE_PX. Comparing the
+    plane width instead overstates the margin by about 20%.
+    """
+    return marker_px_at_altitude(altitude_m, pad_size_m) * MARKER_QUIET_ZONE_FRACTION
+
+
+MARKER_QUIET_ZONE_FRACTION = 0.796
+"""Fraction of the pad's width occupied by the decodable marker itself.
+
+MEASURED, not assumed: the pad textures carry a white quiet zone (which is the
+whole reason they decode at all -- see finding F1), so the black marker is
+smaller than the plane it is painted on. Detecting the marker in
+sim/models/pad_0/aruco_0.png gives a 199 px marker in a 250 px texture.
+
+This matters because the apparent-size budget below is naturally written in
+terms of PAD_SIZE_M, but the DECODER only ever sees this fraction of it. Using
+the plane size makes the budget about 20% optimistic. Confirmed in flight:
+at 5.51 m altitude the bridge reported 88.6 px where the plane-based prediction
+was 100.6 px and the marker-based prediction was 80.1 px.
+"""
 
 MARKER_MIN_DECODE_PX = 25.0
 """Below this apparent size, treat a marker as undecodable rather than absent."""
@@ -222,10 +251,10 @@ MARKER_MIN_DECODE_PX = 25.0
 SEARCH_ALT_M = 6.0
 """Altitude at which marker search happens.
 
-Descend here from TARGET_ALT_M before searching. At 6 m a 2 m pad spans 92 px,
-comfortably above MARKER_MIN_DECODE_PX, while staying high enough that the
-ground footprint (2 * 6 * tan(1.047/2)) is about 7 m and the spiral does not
-need many rings. Belt and braces with PAD_SIZE_M: either lever alone is
+Descend here from TARGET_ALT_M before searching. At 6 m a 2 m pad spans 92 px, of which
+74 px is decodable marker -- comfortably above MARKER_MIN_DECODE_PX -- while
+staying high enough that the ground footprint (2 * 6 * tan(1.047/2)) is about
+7 m and the spiral does not need many rings. Belt and braces with PAD_SIZE_M: either lever alone is
 fragile, together they give roughly 4x headroom (finding F3).
 """
 

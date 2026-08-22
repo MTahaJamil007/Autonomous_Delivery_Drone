@@ -133,25 +133,93 @@ def test_the_pad_is_decodable_at_the_altitude_it_is_searched_from():
     The documented flow -- arrive at TARGET_ALT, then search -- therefore could
     not lock even with a decodable texture. Both levers are applied: a 2 m pad
     AND a descent to SEARCH_ALT_M before searching.
+
+    Compared against decodable_px_at_altitude(), not the raw plane width: the
+    quiet zone means the decoder only ever sees about 80% of the pad, so
+    comparing the plane width overstates the margin by that much.
     """
-    at_search_alt = config.marker_px_at_altitude(config.SEARCH_ALT_M)
+    at_search_alt = config.decodable_px_at_altitude(config.SEARCH_ALT_M)
     assert at_search_alt >= config.MARKER_MIN_DECODE_PX * 2.0, (
-        f"a {config.PAD_SIZE_M} m pad spans {at_search_alt:.0f} px at "
-        f"{config.SEARCH_ALT_M} m; want at least 2x the "
-        f"{config.MARKER_MIN_DECODE_PX:.0f} px decode threshold for margin"
+        f"a {config.PAD_SIZE_M} m pad presents {at_search_alt:.0f} px of decodable "
+        f"marker at {config.SEARCH_ALT_M} m; want at least 2x the "
+        f"{config.MARKER_MIN_DECODE_PX:.0f} px threshold for margin"
     )
 
-    # Reproduce the plan's numbers for the pad this replaces.
-    old_pad_at_cruise = config.marker_px_at_altitude(config.TARGET_ALT_M, 0.5)
-    assert old_pad_at_cruise == pytest.approx(13.9, abs=0.1)
-    assert old_pad_at_cruise < config.MARKER_MIN_DECODE_PX, (
-        "the original configuration really was undecodable"
+    # Reproduce the plan's plane-width figure for the pad this replaces.
+    assert config.marker_px_at_altitude(config.TARGET_ALT_M, 0.5) == pytest.approx(13.9, abs=0.1)
+
+    # Marker-corrected, the original pad is undecodable at EVERY altitude the
+    # mission would have searched from - not merely "marginal at 5 m" as the
+    # plane-width figures suggested.
+    for altitude_m in (config.TARGET_ALT_M, config.SEARCH_ALT_M, 5.0):
+        assert config.decodable_px_at_altitude(altitude_m, 0.5) < config.MARKER_MIN_DECODE_PX, (
+            f"the original 0.5 m pad should be undecodable at {altitude_m} m"
+        )
+
+    # The shipped pad clears the threshold even at full cruise altitude, which is
+    # what gives the search phase its margin.
+    assert config.decodable_px_at_altitude(config.TARGET_ALT_M) > config.MARKER_MIN_DECODE_PX
+
+
+def test_quiet_zone_fraction_matches_the_shipped_texture():
+    """config.MARKER_QUIET_ZONE_FRACTION is a measurement, so measure it.
+
+    The pad textures carry a white quiet zone - the whole reason they decode at
+    all (finding F1) - so the black marker is smaller than the plane it is
+    painted on. If a texture is regenerated without that border, or with a
+    different one, the apparent-size budget silently shifts.
+    """
+    import cv2
+
+    project_root = Path(__file__).resolve().parents[1]
+    detector = cv2.aruco.ArucoDetector(
+        cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50),
+        cv2.aruco.DetectorParameters(),
     )
 
-    # And each lever alone would be marginal - which is why both are used.
-    assert config.marker_px_at_altitude(config.TARGET_ALT_M) >= config.MARKER_MIN_DECODE_PX
-    assert (
-        config.marker_px_at_altitude(config.SEARCH_ALT_M, 0.5) < config.MARKER_MIN_DECODE_PX * 1.2
+    for index in (0, 1, 2):
+        texture = project_root / "sim" / "models" / f"pad_{index}" / f"aruco_{index}.png"
+        image = cv2.imread(str(texture))
+        assert image is not None, f"{texture} unreadable"
+
+        corners, ids, _ = detector.detectMarkers(image)
+        assert ids is not None, f"pad_{index} texture does not decode (finding F1)"
+        assert index in ids.flatten().tolist()
+
+        points = corners[0][0]
+        sides = [float(((points[i] - points[(i + 1) % 4]) ** 2).sum() ** 0.5) for i in range(4)]
+        fraction = (sum(sides) / 4.0) / image.shape[1]
+
+        assert fraction == pytest.approx(config.MARKER_QUIET_ZONE_FRACTION, abs=0.03), (
+            f"pad_{index}: the marker occupies {fraction:.3f} of the texture but "
+            f"config.MARKER_QUIET_ZONE_FRACTION says "
+            f"{config.MARKER_QUIET_ZONE_FRACTION}. The apparent-size budget "
+            f"depends on this ratio."
+        )
+
+
+def test_flight_measured_marker_size_matches_the_corrected_budget():
+    """Pins the one in-flight measurement taken during this remediation.
+
+    At 5.51 m over pad_0, the live vision bridge reported 88.6 px. The
+    plane-width prediction was 100.6 px; the marker-corrected prediction was
+    80.1 px. The measurement sits between them and much nearer the corrected
+    figure, which is why decodable_px_at_altitude() exists. Recorded as a test
+    so that a future change to the intrinsics or the pad has to confront a real
+    observation rather than only the arithmetic.
+    """
+    altitude_m = 5.51
+    measured_px = 88.6
+
+    plane_px = config.marker_px_at_altitude(altitude_m)
+    marker_px = config.decodable_px_at_altitude(altitude_m)
+
+    assert marker_px < measured_px < plane_px * 1.05, (
+        f"measured {measured_px} px should sit between the marker-corrected "
+        f"{marker_px:.1f} px and the plane {plane_px:.1f} px"
+    )
+    assert abs(measured_px - marker_px) < abs(measured_px - plane_px), (
+        "the measurement should sit closer to the marker-corrected prediction"
     )
 
 

@@ -297,16 +297,29 @@ defect in the guide — fix the guide, not the operator.
 Append one row per run. A dated row here is what makes a ✅ in STATUS.md mean
 something.
 
-| Date | Procedure | Operator | Result | Notes |
-| --- | --- | --- | --- | --- |
-| _pending_ | § 1 preflight | — | — | — |
-| _pending_ | § 2 no self-returns | — | — | — |
-| _pending_ | § 3 fail-closed | — | — | — |
-| _pending_ | § 4 three-leg mission | — | — | — |
-| _pending_ | § 5 cargo tracking | — | — | — |
-| _pending_ | § 6 supervisor abort | — | — | — |
-| _pending_ | § 7 twenty landings | — | — | — |
-| _pending_ | § 8 camera signs | — | — | — |
-| _pending_ | § 10 detour, two runs | — | — | — |
-| _pending_ | § 11 three-drone fleet | — | — | — |
-| _pending_ | § 12 new operator | — | — | — |
+| Date | Procedure | Result | Notes |
+| --- | --- | --- | --- |
+| 2026-08-23 | § 1 preflight (PASS half) | **PASS** | 6/6 checks against a live `delivery` world. Verified the vendored model spawns as `x500_delivery_0`, both sensor topics are advertised at the names `sim_topics` predicts, live camera is 320×240 (fx 277.2), live scan is 360 samples / range_max 12.0. The FAIL half (kill the drone, expect a named missing topic) not yet run. |
+| 2026-08-23 | § 2 no self-returns | **PASS (ground)** | 81 datagrams in 8 s (10.0 Hz), `eff_front_m` constant at 15.0 — no propeller returns. Geometry validated against config on the first message. Run over a **60 s hover** to close it fully; this was on the ground. |
+| 2026-08-23 | partial § 7 — live ArUco acquisition | **PASS** | Not the 20-landing statistical gate, but the F1/F3 chain end to end: `pad_0` spawned via the async gz client, climbed to 6 m, the live camera decoded **marker ID 0 only**, 46 detection frames, 88.6 px at 5.51 m vs an 80.1 px marker-corrected prediction. This is the behaviour that had never once worked. |
+| _pending_ | § 3 fail-closed | — | — |
+| _pending_ | § 4 three-leg mission | — | The next thing to run; everything else depends on it. |
+| _pending_ | § 5 cargo tracking | — | — |
+| _pending_ | § 6 supervisor abort | — | — |
+| _pending_ | § 7 twenty landings | — | Needs `scripts/sitl_landing_trial.py`, not shipped. |
+| _pending_ | § 8 camera signs | — | `scripts/calibrate_camera_signs.py` is ready to run. |
+| _pending_ | § 10 detour, two runs | — | The most interesting result in the system. |
+| _pending_ | § 11 three-drone fleet | — | — |
+| _pending_ | § 12 new operator | — | — |
+
+### Also verified live on 2026-08-23, outside the numbered procedures
+
+| What | Result |
+| --- | --- |
+| **F2 — sensors survive independent of the PX4 submodule** | The drone spawned from `sim/models/x500_delivery` with both sensors present. `PX4_GZ_STANDALONE=1` kept `PX4_GZ_MODELS` pointed at the vendored tree, exactly as `sim/env.sh` documents. |
+| **F7 — topics are model-scoped** | Live topics matched `sim_topics.camera_topic()` / `lidar_topic()` character for character: `/world/delivery/model/x500_delivery_0/link/camera_link/sensor/downward_camera/image`. No absolute `/camera/image` anywhere. |
+| **The MAVSDK URL correction** | `udp://0.0.0.0:14540` connected and reported health. `udpin://` — which the plan assumed and the old code used — makes `mavsdk_server` exit and `connect()` block forever. |
+| **`ros_gz_bridge` per-drone remap** | `/drone_0/scan` at 10.03 Hz from the model-scoped Gazebo topic. |
+| **Avoider JSON contract** | Matches docs/ARCHITECTURE.md § 3 field for field, at 10 Hz. |
+| **Vision JSON contract** | Matches § 2 field for field, including `fx` derived from the live width. |
+| **Async pad spawning** | `gz_client.spawn_pad_at_gps` created `test_pickup_pad` without blocking the event loop. |
