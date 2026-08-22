@@ -151,7 +151,8 @@ had, so a failure names the specific mistake.
 528 lines that duplicated the mission core.
 
 Full contract table, FSM diagram and the offboard invariant:
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). What changed and what is left:
+[docs/IMPLEMENTATION_REPORT.md](docs/IMPLEMENTATION_REPORT.md).
 
 ---
 

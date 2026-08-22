@@ -6,6 +6,27 @@ fix the guide.
 
 ---
 
+## Quick start
+
+Already set up? This is the whole thing:
+
+```bash
+cd ~/DroneProgram
+source sim/env.sh          # 1. point Gazebo + PX4 at the vendored assets
+world/spawn_fleet.sh       # 2. Gazebo server + PX4 instance(s)
+scripts/run_system.sh      # 3. services, bridges, avoiders, vision
+python3 scripts/preflight.py   # 4. MUST print PREFLIGHT PASS
+```
+
+Then open <http://localhost:5000>, click the map twice, press **Dispatch**.
+
+Stop with `scripts/stop_system.sh`. First time on this machine? Start at
+[Prerequisites](#prerequisites) instead — and read
+[step 4](#then-verify-before-dispatching-anything), which is the one step people
+skip and should not.
+
+---
+
 ## Prerequisites
 
 | Requirement | Check |
@@ -82,11 +103,87 @@ where a failure explains itself — that column is the point. A failed job that
 says only "FAILED" is barely more useful than the silent false "COMPLETED" this
 system used to report.
 
+### What success looks like
+
+So you can tell a working system from a broken one without asking anybody.
+
+**After `world/spawn_fleet.sh`** — the drone exists and carries its sensors:
+
+```bash
+$ gz topic -l | grep -c x500_delivery_0
+20                       # non-zero is what matters
+$ python3 -m sim_topics --drone-id drone-0
+camera   /world/delivery/model/x500_delivery_0/link/camera_link/sensor/downward_camera/image
+lidar    /world/delivery/model/x500_delivery_0/link/lidar_link/sensor/rplidar_a1/scan
+ros-scan /drone_0/scan
+```
+
+**After `scripts/run_system.sh`** — preflight passes, all six checks:
+
+```
+[  ok  ] landing pads decode          pad_0=id0, pad_1=id1, pad_2=id2
+[  ok  ] gazebo reachable             48 topics advertised
+[  ok  ] drone-0: camera topic        /world/delivery/.../downward_camera/image
+[  ok  ] drone-0: lidar topic         /world/delivery/.../rplidar_a1/scan
+[  ok  ] drone-0: camera geometry     320x240, fx=277.2 px, 2.0 m pad spans 92 px at 6 m
+[  ok  ] drone-0: lidar geometry      360 samples, angle_min=-3.1416 rad, range_max=12.0 m
+
+PREFLIGHT PASS - 6 checks, 0 failures
+```
+
+**The avoider is alive and seeing nothing** (the drone is on the ground in an
+empty area, so `eff_front_m` should be the 15.0 m infinity substitute — a
+*sustained* reading near 0.3 m means propeller returns are getting through):
+
+```bash
+$ tail -2 /tmp/droneprogram/avoider_0.log
+scan geometry verified: 360 samples, angle_min=-3.1416 rad, range_max=12.0 m
+CLEAR -> CLEAR | front=15.0m left=15.0m right=15.0m dodge_age=0.0s
+```
+
+**The camera is alive** and reports the geometry the landing controller assumes:
+
+```bash
+$ tail -1 /tmp/droneprogram/vision_0.log
+first frame: 320x240, fx=277.2 px, 2.0 m pad spans 92 px at 6 m
+```
+
+**During a mission**, the FSM narrates itself:
+
+```bash
+$ grep -- '--\[' /tmp/droneprogram/fleet_dispatch.log | tail -5
+[drone-0] IDLE --[start]--> TAKEOFF
+[drone-0] TAKEOFF --[altitude_reached]--> ENROUTE
+[drone-0] ENROUTE --[arrived]--> SEARCHING
+[drone-0] SEARCHING --[marker_locked]--> APPROACH
+[drone-0] APPROACH --[centered_stable]--> DESCEND
+```
+
+A finished mission ends `NEXT_LEG --[mission_complete]--> DONE` and the job shows
+`COMPLETED`. **Anything else carries a reason** — in the browser's *Reason /
+detail* column, and in `curl -s localhost:5000/jobs`.
+
+**One number worth checking after every flight.** PX4 drops OFFBOARD if the
+setpoint stream gaps for about half a second, so the publisher reports its worst
+gap on shutdown:
+
+```bash
+$ grep 'setpoint stats' /tmp/droneprogram/fleet_dispatch.log
+[drone-0] setpoint stats: {'publishes': 8412, 'send_failures': 0, 'max_gap_s': 0.0621, ...}
+```
+
+`max_gap_s` well under 0.4 and `send_failures: 0` is healthy. A large gap means
+something blocked the event loop — that is finding F5, and `make blocking-check`
+is the gate meant to prevent it.
+
 ### Stopping
 
 ```bash
 scripts/stop_system.sh
 ```
+
+Leaves `obstacle_memory_service/obstacles.db` in place, deliberately: that file
+is what makes a second run of a route avoid a wall the first run discovered.
 
 ---
 
@@ -239,3 +336,4 @@ After changing anything in the camera or pad group, run `make schema-check`.
 | [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) | Every acceptance criterion and how it is verified |
 | [STATUS.md](STATUS.md) | What works, with evidence for each claim |
 | [CHANGELOG.md](CHANGELOG.md) | History |
+| [docs/IMPLEMENTATION_REPORT.md](docs/IMPLEMENTATION_REPORT.md) | What changed, what is left, and why |
