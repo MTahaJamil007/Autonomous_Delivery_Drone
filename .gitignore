@@ -1,3 +1,25 @@
-vision_env/
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenvs
+vision_env/
+.venv/
+venv/
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runtime artefacts — never commit state
+*.db
+*.db-wal
+*.db-shm
+*.log
+logs/

@@ -1,0 +1,89 @@
+diff --git a/models/x500_base/model.sdf b/models/x500_base/model.sdf
+index bdeb665..b41c001 100644
+--- a/models/x500_base/model.sdf
++++ b/models/x500_base/model.sdf
+@@ -312,6 +312,46 @@
+         <always_on>1</always_on>
+         <update_rate>30</update_rate>
+       </sensor>
++      <sensor name="downward_camera" type="camera">
++    <pose>0 0 -0.05 0 1.5708 0</pose>
++    <camera>
++        <horizontal_fov>1.047</horizontal_fov>
++        <image>
++            <width>320</width>
++            <height>240</height>
++        </image>
++        <clip>
++            <near>0.1</near>
++            <far>100</far>
++        </clip>
++    </camera>
++    <always_on>1</always_on>
++    <update_rate>10</update_rate>
++    <visualize>true</visualize>
++    <topic>/camera/image</topic>
++</sensor>
++<sensor name="rplidar_a1" type="gpu_lidar">
++    <pose>0 0 0.1 0 0 0</pose>
++    <always_on>true</always_on>
++    <update_rate>10</update_rate>
++    <visualize>true</visualize>
++    <topic>/lidar/scan</topic>
++    <lidar>
++        <scan>
++            <horizontal>
++                <samples>360</samples>
++                <resolution>1</resolution>
++                <min_angle>-3.14159</min_angle>
++                <max_angle>3.14159</max_angle>
++            </horizontal>
++        </scan>
++        <range>
++            <min>0.15</min>
++            <max>12.0</max>
++            <resolution>0.01</resolution>
++        </range>
++    </lidar>
++</sensor>
+     </link>
+     <link name="rotor_0">
+       <gravity>true</gravity>
+diff --git a/worlds/default.sdf b/worlds/default.sdf
+index 584b51f..7d353e5 100644
+--- a/worlds/default.sdf
++++ b/worlds/default.sdf
+@@ -86,9 +86,31 @@
+     <spherical_coordinates>
+       <surface_model>EARTH_WGS84</surface_model>
+       <world_frame_orientation>ENU</world_frame_orientation>
+-      <latitude_deg>47.397971057728974</latitude_deg>
+-      <longitude_deg> 8.546163739800146</longitude_deg>
++      <latitude_deg>30.0314722223</latitude_deg>
++      <longitude_deg>72.3140833333</longitude_deg>
+       <elevation>0</elevation>
+     </spherical_coordinates>
++    <include>
++    <uri>model://arucotag</uri>
++    <name>landing_pad</name>
++    <pose>5 0 0.01 0 0 0</pose>
++</include>
++
++<model name="great_wall">
++        <pose>0 15 10 0 0 0</pose> <static>true</static>
++        <link name="link">
++            <collision name="collision">
++                <geometry><box><size>30 1 20</size></box></geometry>
++            </collision>
++            <visual name="visual">
++                <geometry><box><size>30 1 20</size></box></geometry>
++                <material>
++                    <ambient>0.6 0.2 0.2 1</ambient>
++                    <diffuse>0.6 0.2 0.2 1</diffuse>
++                </material>
++            </visual>
++        </link>
++    </model>
++
+   </world>
+ </sdf>

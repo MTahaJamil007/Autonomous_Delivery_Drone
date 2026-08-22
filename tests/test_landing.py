@@ -1,7 +1,8 @@
-from pathlib import Path
 """
 Unit tests for landing module - marker disambiguation.
 """
+
+from pathlib import Path
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))

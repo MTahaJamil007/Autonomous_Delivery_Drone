@@ -1,10 +1,11 @@
-from pathlib import Path
 """
 SITL Test: Battery Abort
 
 Tests that the mission FSM transitions to ABORT state when battery level is
 insufficient for a planned leg.
 """
+
+from pathlib import Path
 
 import asyncio
 import logging
@@ -17,6 +18,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+@pytest.mark.sitl  # needs a live PX4 + Gazebo; excluded from the default run
 @pytest.mark.asyncio
 async def test_battery_abort():
     """

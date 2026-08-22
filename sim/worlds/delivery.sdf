@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  delivery.sdf - DroneProgram mission world.
+
+  Vendored from PX4's Tools/simulation/gz/worlds/default.sdf (remediation plan
+  P0.2, finding F2). Two deliberate differences from the previous in-submodule
+  hand-edit:
+
+  1. The world origin is 30.0314722 N, 72.3140833 E, matching the Leaflet map
+     centre in fleet_dispatch/templates/index.html. Keep the two in sync: the
+     map draws the drone at its GPS position, so a mismatch puts the marker in
+     the wrong country.
+
+  2. There is NO `landing_pad` include. The previous edit spawned
+     `model://arucotag`, whose texture fills the plane edge to edge with no
+     white quiet zone; ArUco's contour stage cannot segment it, and it decodes
+     in zero of OpenCV's 27 predefined dictionaries (finding F1). That single
+     asset is why precision landing never worked. Pads are now spawned at
+     mission time from world/marker_models.PAD_MODELS, which point at the
+     decodable 2 m pad_0/pad_1/pad_2 models.
+
+  `great_wall` is retained: it is the fixture the P5 detour acceptance test
+  flies against. 30 m wide and 20 m tall at 15 m north, so a drone cruising
+  north at TARGET_ALT cannot pass over or quickly around it.
+-->
+<sdf version="1.9">
+  <world name="delivery">
+    <physics type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <gravity>0 0 -9.8</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+    <atmosphere type="adiabatic"/>
+    <scene>
+      <grid>false</grid>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.7 0.7 1</background>
+      <shadows>true</shadows>
+    </scene>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>1 1</size>
+            </plane>
+          </geometry>
+          <surface>
+            <friction>
+              <ode/>
+            </friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>500 500</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.8 0.8 0.8 1</specular>
+          </material>
+        </visual>
+        <pose>0 0 0 0 -0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 -0 0</pose>
+          <mass>1</mass>
+          <inertia>
+            <ixx>1</ixx><ixy>0</ixy><ixz>0</ixz>
+            <iyy>1</iyy><iyz>0</iyz><izz>1</izz>
+          </inertia>
+        </inertial>
+        <enable_wind>false</enable_wind>
+      </link>
+      <pose>0 0 0 0 -0 0</pose>
+      <self_collide>false</self_collide>
+    </model>
+
+    <light name="sunUTC" type="directional">
+      <pose>0 0 500 0 -0 0</pose>
+      <cast_shadows>true</cast_shadows>
+      <intensity>1</intensity>
+      <direction>0.001 0.625 -0.78</direction>
+      <diffuse>0.904 0.904 0.904 1</diffuse>
+      <specular>0.271 0.271 0.271 1</specular>
+      <attenuation>
+        <range>2000</range>
+        <linear>0</linear>
+        <constant>1</constant>
+        <quadratic>0</quadratic>
+      </attenuation>
+      <spot>
+        <inner_angle>0</inner_angle>
+        <outer_angle>0</outer_angle>
+        <falloff>0</falloff>
+      </spot>
+    </light>
+
+    <!-- Obstacle fixture for the P5 detour acceptance test. Wide and tall
+         enough that reactive dodging alone cannot resolve it, which is what
+         drives the 12 s ESCALATE -> plan_detour path. -->
+    <model name="great_wall">
+      <static>true</static>
+      <pose>0 15 10 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>30 1 20</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>30 1 20</size></box></geometry>
+          <material>
+            <ambient>0.6 0.2 0.2 1</ambient>
+            <diffuse>0.6 0.2 0.2 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Must match the Leaflet map centre in
+         fleet_dispatch/templates/index.html. -->
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>30.0314722223</latitude_deg>
+      <longitude_deg>72.3140833333</longitude_deg>
+      <elevation>0</elevation>
+    </spherical_coordinates>
+  </world>
+</sdf>

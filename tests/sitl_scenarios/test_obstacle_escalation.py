@@ -1,10 +1,11 @@
-from pathlib import Path
 """
 SITL Test: Obstacle Escalation
 
 Tests that prolonged obstacle avoidance triggers escalation to detour planning
 instead of oscillating indefinitely.
 """
+
+from pathlib import Path
 
 import asyncio
 import logging
@@ -18,6 +19,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+@pytest.mark.sitl  # needs a live PX4 + Gazebo; excluded from the default run
 @pytest.mark.asyncio
 async def test_obstacle_escalation():
     """

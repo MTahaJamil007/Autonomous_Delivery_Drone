@@ -15,10 +15,8 @@ import subprocess
 import time
 from typing import Dict, Any, Tuple, Callable
 
-# R4.1: Use relative path instead of hardcoded absolute path
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
 
 logger = logging.getLogger(__name__)

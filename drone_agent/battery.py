@@ -5,10 +5,8 @@ Battery management and energy estimation for mission planning.
 import logging
 from typing import Dict, Any
 
-# R4.1: Use relative path instead of hardcoded absolute path
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
 from drone_agent.navigation import get_distance_m
 

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  cargo_box - the parcel carried between pickup and drop-off.
+
+  static=true is intentional and load-bearing. PayloadBay does not create a
+  physics joint: a hung payload adds pendulum dynamics that destabilise the
+  attitude controller. Instead the box's pose is commanded directly each tick
+  while secured. A non-static box would free-fall between pose updates and
+  fight the setpoint. See drone_agent/payload.py.
+-->
+<sdf version='1.9'>
+  <model name='cargo_box'>
+    <static>true</static>
+    <pose>0 0 0 0 0 0</pose>
+    <link name='link'>
+      <visual name='visual'>
+        <geometry>
+          <box>
+            <size>0.25 0.25 0.18</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.72 0.52 0.30 1</ambient>
+          <diffuse>0.72 0.52 0.30 1</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+      <!-- Visual only: a collision shape on a kinematically teleported body
+           generates spurious contacts with the airframe it is following. -->
+    </link>
+  </model>
+</sdf>

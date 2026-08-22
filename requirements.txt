@@ -1,18 +1,34 @@
-# Core dependencies for autonomous delivery drone system
+# Runtime dependencies. Prefer `pip install -e .` (see pyproject.toml), which is
+# what makes `import config` work from any working directory; this file is kept
+# for environments that cannot do an editable install.
+#
+# NOTE on editable installs on this host: the system setuptools (59.6) predates
+# PEP 660, so pip's build isolation picks it up and rejects the editable build.
+# Use:
+#     pip install --user "setuptools>=68,<80"   # <80 keeps colcon working
+#     pip install -e . --no-build-isolation
+
 fastapi>=0.104.0
 uvicorn>=0.24.0
 pydantic>=2.0.0
-mavsdk>=1.4.0
+jinja2>=3.1.0
+
+# PINNED DELIBERATELY. Battery.remaining_percent is 0-100 in MAVSDK 2.x and was
+# 0-1 in 1.x. The previous `mavsdk>=1.4.0` spanned that break, so every
+# comparison against config.BATTERY_*_PCT was either 100x too strict or 100x too
+# lax depending on what pip happened to resolve. Do not relax without auditing
+# drone_agent/battery.py and drone_agent/safety_supervisor.py.
+mavsdk>=2.0,<3
+
 opencv-contrib-python>=4.8.0
 numpy>=1.24.0
 aiosqlite>=0.19.0
 aiohttp>=3.9.0
-requests>=2.31.0
 
-# Protobuf version pin (S2.5: prevents "Descriptors cannot be created directly" error)
-# This version is compatible with Gazebo transport bindings
-protobuf>=3.20,<3.21
+# Gazebo transport Python bindings need a protobuf runtime compatible with the
+# system gz build. Provided by the distro's python3-gz-transport13 package, not
+# by pip -- listed here so the constraint is not forgotten.
+# protobuf>=3.20,<3.21
 
-# Optional: testing and development
-pytest>=7.4.0
-pytest-asyncio>=0.21.0
+# Development extras: pip install -e ".[dev]"
+# pytest, pytest-asyncio, ruff -- declared in pyproject.toml [project.optional-dependencies]

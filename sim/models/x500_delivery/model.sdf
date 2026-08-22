@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  x500_delivery - stock x500 + downward camera + 360-degree 2D LiDAR.
+
+  DELIBERATE OMISSION: neither sensor declares a <topic>. Gazebo then derives
+  the topic from the entity path, giving each spawned instance its own topic:
+
+    /world/<world>/model/<model>/link/camera_link/sensor/downward_camera/image
+    /world/<world>/model/<model>/link/lidar_link/sensor/rplidar_a1/scan
+
+  The previous in-submodule edit hardcoded absolute /camera/image and
+  /lidar/scan, so every drone in a fleet published onto the same two topics and
+  every consumer saw a blend of all of them (finding F7). Do not add <topic>
+  back. Consumers take the topic name as a CLI argument instead; resolve it with
+  `python -m perception.topics <model_name>`.
+
+  GEOMETRY IS LOAD-BEARING. The camera's net rotation relative to base_link is
+  pitch +1.5708 rad, which is what makes the image-to-body sign mapping in
+  docs/CALIBRATION.md correct. Changing the pose here silently inverts the
+  precision-landing control loop. The 0.5 m/px arithmetic in
+  config.PAD_SIZE_M depends on width=320 and horizontal_fov=1.047.
+-->
+<sdf version='1.9'>
+  <model name='x500_delivery'>
+    <self_collide>false</self_collide>
+
+    <include merge='true'>
+      <uri>x500</uri>
+    </include>
+
+    <!-- Downward camera: fx = (320/2) / tan(1.047/2) = 277.1 px -->
+    <joint name="downward_camera_joint" type="fixed">
+      <parent>base_link</parent>
+      <child>camera_link</child>
+    </joint>
+    <link name="camera_link">
+      <!-- pitch +90 deg: camera looks straight down. See docs/CALIBRATION.md. -->
+      <pose relative_to="base_link">0 0 -0.05 0 1.5708 0</pose>
+      <inertial>
+        <mass>0.001</mass>
+        <inertia>
+          <ixx>0.00001</ixx><ixy>0.0</ixy><ixz>0.0</ixz>
+          <iyy>0.00001</iyy><iyz>0.0</iyz><izz>0.00001</izz>
+        </inertia>
+      </inertial>
+      <sensor name="downward_camera" type="camera">
+        <gz_frame_id>camera_link</gz_frame_id>
+        <pose>0 0 0 0 0 0</pose>
+        <camera>
+          <horizontal_fov>1.047</horizontal_fov>
+          <image>
+            <width>320</width>
+            <height>240</height>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>100</far>
+          </clip>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>10</update_rate>
+        <visualize>true</visualize>
+      </sensor>
+    </link>
+
+    <!-- RPLIDAR A1 equivalent: 360 samples over the full circle, 1 deg/sample -->
+    <joint name="rplidar_joint" type="fixed">
+      <parent>base_link</parent>
+      <child>lidar_link</child>
+    </joint>
+    <link name="lidar_link">
+      <pose relative_to="base_link">0 0 0.1 0 0 0</pose>
+      <inertial>
+        <mass>0.001</mass>
+        <inertia>
+          <ixx>0.00001</ixx><ixy>0.0</ixy><ixz>0.0</ixz>
+          <iyy>0.00001</iyy><iyz>0.0</iyz><izz>0.00001</izz>
+        </inertia>
+      </inertial>
+      <sensor name="rplidar_a1" type="gpu_lidar">
+        <gz_frame_id>lidar_link</gz_frame_id>
+        <pose>0 0 0 0 0 0</pose>
+        <always_on>true</always_on>
+        <update_rate>10</update_rate>
+        <visualize>true</visualize>
+        <lidar>
+          <scan>
+            <horizontal>
+              <samples>360</samples>
+              <resolution>1</resolution>
+              <min_angle>-3.14159</min_angle>
+              <max_angle>3.14159</max_angle>
+            </horizontal>
+          </scan>
+          <range>
+            <!-- 0.15 m sensor floor is BELOW the 0.29 m prop radius, so prop
+                 returns are physically possible. avoider_node masks them with
+                 config.MIN_VALID_RANGE_M rather than changing this. -->
+            <min>0.15</min>
+            <max>12.0</max>
+            <resolution>0.01</resolution>
+          </range>
+        </lidar>
+      </sensor>
+    </link>
+  </model>
+</sdf>

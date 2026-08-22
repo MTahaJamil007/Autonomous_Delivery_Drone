@@ -1,10 +1,11 @@
-from pathlib import Path
 """
 SITL Test: Marker Disambiguation
 
 Tests that the landing system correctly identifies and lands on the expected
 marker when multiple markers are simultaneously visible.
 """
+
+from pathlib import Path
 
 import asyncio
 import logging
@@ -17,6 +18,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+@pytest.mark.sitl  # needs a live PX4 + Gazebo; excluded from the default run
 @pytest.mark.asyncio
 async def test_marker_disambiguation():
     """
@@ -77,7 +79,11 @@ async def test_marker_disambiguation():
         logger.info("   1. Spawn marker ID 0 at ~11m north of home")
         logger.info("   2. Spawn marker ID 1 at ~22m north of home")
         logger.info("   3. Position drone above markers")
-        input("Press Enter when ready...")
+        # P0.4: `input()` here blocked the whole pytest run indefinitely --
+        # with no TTY it never returns, so `pytest tests/` hung forever and
+        # the suite reported nothing. A test may not wait on a human.
+        # The setup it was waiting for is now automated: pads are spawned
+        # from world.marker_models.PAD_MODELS by the mission itself.
         
         # Take off
         logger.info("Taking off...")

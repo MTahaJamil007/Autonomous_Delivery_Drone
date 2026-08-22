@@ -13,9 +13,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
-# R4.1: Use relative path instead of hardcoded absolute path
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
 
 logger = logging.getLogger(__name__)

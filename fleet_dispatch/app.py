@@ -16,10 +16,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Import fleet dispatch database
-# R4.1: Use relative path instead of hardcoded absolute path
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fleet_dispatch import db as fleet_db
 
 # Import original drone logic for mission execution

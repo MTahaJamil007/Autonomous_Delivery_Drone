@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "droneprogram"
+version = "0.8.0"
+description = "Autonomous delivery drone fleet: PX4 SITL, ROS 2, Gazebo Harmonic"
+requires-python = ">=3.10"
+
+# WHY THIS FILE EXISTS
+# --------------------
+# Nine modules used to begin with `sys.path.insert(0, parents[1])` so that
+# `import config` would resolve. That works only when the process happens to
+# start from the right directory, which is why fleet_dispatch/app.py and
+# obstacle_memory_service/app.py could each be launched from exactly one
+# working directory and failed anywhere else. `pip install -e .` makes the
+# packages importable from anywhere and lets every one of those hacks go.
+dependencies = [
+    "fastapi>=0.104",
+    "uvicorn>=0.24",
+    "pydantic>=2.0",
+    "jinja2>=3.1",
+    # PINNED DELIBERATELY: Battery.remaining_percent is 0-100 in MAVSDK 2.x and
+    # was 0-1 in 1.x. The old `mavsdk>=1.4.0` spanned that break, so the
+    # battery gate was either 100x too strict or 100x too lax depending on
+    # which version pip resolved. Do not relax this without auditing every
+    # comparison against BATTERY_*_PCT.
+    "mavsdk>=2.0,<3",
+    "opencv-contrib-python>=4.8",
+    "numpy>=1.24",
+    "aiosqlite>=0.19",
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+drone-preflight = "scripts.preflight:main"
+
+[tool.setuptools]
+# Explicit list: py-modules and packages are enumerated so a stray directory
+# never silently becomes an installed package.
+packages = [
+    "drone_agent",
+    "drone_web",
+    "fleet_dispatch",
+    "global_planner",
+    "obstacle_memory_service",
+    "perception",
+    "world",
+]
+py-modules = ["config", "sim_topics", "avoider_node"]
+
+[tool.setuptools.package-data]
+fleet_dispatch = ["schema.sql", "templates/*.html"]
+obstacle_memory_service = ["schema.sql"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["vision_env", "sim"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle + pyflakes
+    "I",             # import sorting
+    "B",             # bugbear: mutable defaults, unused loop vars, ...
+    "UP",            # pyupgrade
+    "ASYNC",         # blocking calls in async functions -- finding F5
+    "RUF006",        # dangling asyncio.create_task references
+]
+ignore = [
+    "E501",   # line length is enforced by the formatter, not the linter
+    "B008",   # FastAPI's Depends()/Query() in defaults is the framework idiom
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests print for human-readable output and are allowed loose imports.
+"tests/*" = ["E402", "F401"]

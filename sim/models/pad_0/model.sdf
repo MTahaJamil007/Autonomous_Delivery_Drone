@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  pad_0 - ArUco ID 0 landing pad, 2.0 x 2.0 m.
+
+  SIZE IS LOAD-BEARING: config.PAD_SIZE_M must match the <size> below, because
+  the acquisition-altitude budget (config.SEARCH_ALT_M) is derived from it as
+  px = fx * PAD_SIZE_M / altitude. See docs/ARCHITECTURE.md finding F3.
+-->
+<sdf version='1.9'>
+  <model name='pad_0'>
+    <static>true</static>
+    <pose>0 0 0.001 0 0 0</pose>
+    <link name='base'>
+      <visual name='base_visual'>
+        <geometry>
+          <plane>
+            <normal>0 0 1</normal>
+            <size>2.0 2.0</size>
+          </plane>
+        </geometry>
+        <material>
+          <diffuse>1 1 1 1</diffuse>
+          <specular>0.4 0.4 0.4 1</specular>
+          <pbr>
+            <metal>
+              <albedo_map>model://pad_0/aruco_0.png</albedo_map>
+            </metal>
+          </pbr>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>
