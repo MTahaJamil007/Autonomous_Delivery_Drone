@@ -10,7 +10,18 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 import logging
 
-from db import init_database, upsert_obstacle, query_bbox, get_all_obstacles
+# PACKAGE-RELATIVE. `from db import ...` only resolved when the process's
+# working directory happened to be obstacle_memory_service/, which is why
+# RUN_GUIDE.md's step 3 launched the OTHER (in-memory) service from the repo
+# root instead - and why "fleet-wide obstacle sharing, persisted between
+# missions" reset on every restart.
+from obstacle_memory_service.db import (
+    get_all_obstacles,
+    get_stats,
+    init_database,
+    query_bbox,
+    upsert_obstacle,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -55,7 +66,8 @@ async def startup_event():
     """Initialize database on startup."""
     logger.info("🚀 Obstacle Memory Service starting...")
     await init_database()
-    logger.info("✅ Service ready on port 5050")
+    import config
+    logger.info("obstacle memory ready on port %d", config.OBSTACLE_MEMORY_PORT)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -134,6 +146,22 @@ async def get_obstacles(
     except Exception as e:
         logger.error(f"Failed to query obstacles: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats")
+async def stats():
+    """How much the fleet has actually learned.
+
+    RUN_SYSTEM.sh advertised this endpoint and it did not exist, so the
+    "fleet obstacle sharing" checklist item pointed at a 404. It is also the
+    quickest way to answer the P5 question -- did run 1 record the wall? -- from
+    a browser instead of from sqlite3.
+    """
+    try:
+        return await get_stats()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("stats failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 if __name__ == "__main__":
