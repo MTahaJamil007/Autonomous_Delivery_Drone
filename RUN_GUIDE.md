@@ -337,3 +337,8 @@ After changing anything in the camera or pad group, run `make schema-check`.
 | [STATUS.md](STATUS.md) | What works, with evidence for each claim |
 | [CHANGELOG.md](CHANGELOG.md) | History |
 | [docs/IMPLEMENTATION_REPORT.md](docs/IMPLEMENTATION_REPORT.md) | What changed, what is left, and why |
+
+Shareable web versions of this guide (*Dispatch Runbook*) and the handover
+report (*Remediation Handover*) are linked at the top of
+[docs/IMPLEMENTATION_REPORT.md](docs/IMPLEMENTATION_REPORT.md). This file is
+the source of truth; update it first, then republish.

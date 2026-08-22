@@ -8,6 +8,13 @@ This is the handover document. For the chronological narrative see
 [STATUS.md](../STATUS.md); for how to run any of it see
 [RUN_GUIDE.md](../RUN_GUIDE.md).
 
+> **Shareable versions.** This document is published as
+> *Remediation Handover* → <https://claude.ai/code/artifact/c651dab8-d3af-4b06-a7f6-0da1d8364f72>
+> and the run guide as
+> *Dispatch Runbook* → <https://claude.ai/code/artifact/1a01203f-2d4b-4325-a4e1-79c3991b446a>.
+> Both are private until shared from the page's share menu. The Markdown here
+> remains the source of truth; update it first, then republish.
+
 | | |
 | --- | --- |
 | **Branch** | `remediation` (7 commits; `main` untouched) |
