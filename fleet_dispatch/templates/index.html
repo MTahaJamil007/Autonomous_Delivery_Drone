@@ -1,112 +1,275 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Drone Command Center</title>
+
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    
     <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" />
     <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
 
     <style>
-        body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
-        #map { height: 85vh; width: 100vw; }
-        #panel { height: 15vh; padding: 10px; background: #222; color: white; text-align: center; }
-        button { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #28a745; color: white; border: none; border-radius: 5px; margin: 5px; }
-        button:disabled { background: #555; cursor: not-allowed; }
-        .instructions { font-size: 14px; color: #aaa; margin-top: 5px; }
+        :root {
+            --bg: #1a1d21; --panel: #22262b; --line: #33383f;
+            --text: #e8eaed; --muted: #9aa0a6;
+            --ok: #34a853; --busy: #4285f4; --warn: #fbbc04; --bad: #ea4335;
+        }
+        * { box-sizing: border-box; }
+        body { margin: 0; font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+               background: var(--bg); color: var(--text); }
+        #layout { display: flex; flex-direction: column; height: 100vh; }
+        #map { flex: 1 1 auto; min-height: 0; }
+        #panel { flex: 0 0 auto; background: var(--panel); border-top: 1px solid var(--line);
+                 padding: 10px 14px; max-height: 42vh; overflow-y: auto; }
+        .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        button { padding: 8px 16px; font-size: 14px; cursor: pointer; border: none;
+                 border-radius: 5px; background: var(--ok); color: #fff; font-weight: 600; }
+        button.secondary { background: #4a5058; }
+        button:disabled { background: #3a3f46; color: var(--muted); cursor: not-allowed; }
+        .hint { color: var(--muted); font-size: 12.5px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+        th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line);
+                 vertical-align: top; }
+        th { color: var(--muted); font-weight: 600; font-size: 11.5px;
+             text-transform: uppercase; letter-spacing: .04em; }
+        .pill { display: inline-block; padding: 1px 8px; border-radius: 10px;
+                font-size: 11.5px; font-weight: 700; }
+        .s-AVAILABLE, .s-COMPLETED { background: rgba(52,168,83,.18); color: #6ee7a0; }
+        .s-BUSY, .s-IN_PROGRESS, .s-ASSIGNED { background: rgba(66,133,244,.18); color: #8ab4f8; }
+        .s-QUEUED { background: rgba(251,188,4,.18); color: #fdd663; }
+        .s-FAILED, .s-ABORTED, .s-ERROR, .s-OFFLINE { background: rgba(234,67,53,.18); color: #f28b82; }
+        /* The reason column is the point of this table. It wraps rather than
+           truncating: a failure whose explanation is cut off is a failure the
+           operator still has to go and dig out of a log. */
+        .reason { color: #f28b82; font-family: ui-monospace, SFMono-Regular, monospace;
+                  font-size: 12px; word-break: break-word; max-width: 46ch; }
+        .detail { color: var(--muted); font-size: 12px; }
+        h3 { margin: 14px 0 0; font-size: 12px; color: var(--muted);
+             text-transform: uppercase; letter-spacing: .05em; }
+        #banner { display: none; margin-top: 8px; padding: 8px 10px; border-radius: 5px;
+                  background: rgba(234,67,53,.14); border: 1px solid rgba(234,67,53,.4);
+                  color: #f28b82; font-size: 13px; }
     </style>
 </head>
 <body>
-    <div id="panel">
-        <h2 id="status" style="margin: 5px 0;">Status: Awaiting Dispatch</h2>
-        <button id="dispatchBtn" disabled>Dispatch Drone</button>
-        <button id="resetBtn" onclick="location.reload()">Reset Map</button>
-        <div class="instructions">Use the Search Bar (Top Right) to find an address, then CLICK the map to drop the Pickup and Drop-off pads.</div>
-    </div>
+<div id="layout">
     <div id="map"></div>
 
-    <script>
-        // 1. Dual Map Layers (Free & High-Res)
-        var satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 });
-        var streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 });
+    <div id="panel">
+        <div class="row">
+            <strong id="headline">Awaiting dispatch</strong>
+            <span class="hint" id="fleetSummary"></span>
+            <span style="flex:1"></span>
+            <button id="dispatchBtn" disabled>Dispatch</button>
+            <button class="secondary" onclick="location.reload()">Clear pins</button>
+        </div>
+        <div class="hint">
+            Search for a place, then click the map twice: first click sets the pickup pad,
+            second sets the drop-off. Landing pads spawn at those coordinates with ArUco
+            IDs 0 and 1; the home pad carries ID 2.
+        </div>
+        <div id="banner"></div>
 
-        // Initialize Map
-        var map = L.map('map', {
-            center: [30.0315, 72.3140], // University coordinates
-            zoom: 17,
-            layers: [satelliteLayer] // Default to satellite
-        });
+        <h3>Fleet</h3>
+        <table>
+            <thead><tr>
+                <th>Drone</th><th>Status</th><th>Job</th><th>Position</th>
+                <th>Alt</th><th>Battery</th><th>Detail</th>
+            </tr></thead>
+            <tbody id="fleetRows"><tr><td colspan="7" class="detail">connecting…</td></tr></tbody>
+        </table>
 
-        // Layer Toggle Control (Top Right)
-        L.control.layers({ "Satellite View": satelliteLayer, "Street Map": streetLayer }).addTo(map);
+        <h3>Recent jobs</h3>
+        <table>
+            <thead><tr>
+                <th>Job</th><th>Status</th><th>Drone</th><th>Reason / detail</th>
+            </tr></thead>
+            <tbody id="jobRows"><tr><td colspan="4" class="detail">none yet</td></tr></tbody>
+        </table>
+    </div>
+</div>
 
-        // Address Search Bar
-        var geocoder = L.Control.geocoder({
-            defaultMarkGeocode: false,
-            placeholder: "Search address or city..."
-        }).addTo(map);
+<script>
+// World origin, matching sim/worlds/delivery.sdf's <spherical_coordinates>. If
+// these two drift apart, the map draws the drone in the wrong place while every
+// number in the system is internally consistent -- which is a painful bug to
+// chase, so keep them in sync deliberately.
+const ORIGIN = [30.0314722, 72.3140833];
+const FLEET_SIZE = {{ fleet_size }};
 
-        // Move map when address is found
-        geocoder.on('markgeocode', function(e) {
-            map.fitBounds(e.geocode.bbox);
-        });
+const satellite = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { maxZoom: 19, attribution: 'Esri' });
+const street = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { maxZoom: 19, attribution: 'OpenStreetMap' });
 
-        // Pin Dropping Logic
-        var pickupMarker = null;
-        var dropMarker = null;
+const map = L.map('map', { center: ORIGIN, zoom: 17, layers: [satellite] });
+L.control.layers({ 'Satellite': satellite, 'Street': street }).addTo(map);
 
-        // Custom Drone Icon
-        var droneIcon = L.icon({
-            iconUrl: 'data:image/svg+xml;charset=UTF-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2248%22 height=%2248%22 viewBox=%220 0 48 48%22%3E%3Cg fill=%22none%22 stroke=%22%2300d1ff%22 stroke-width=%223%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22M24 16v16M16 24h16%22/%3E%3Cpath d=%22M12 12l5 5M36 12l-5 5M12 36l5-5M36 36l-5-5%22/%3E%3Ccircle cx=%2224%22 cy=%2224%22 r=%226%22 fill=%22%2300d1ff%22 stroke=%22%2300d1ff%22/%3E%3Ccircle cx=%2212%22 cy=%2212%22 r=%223%22 fill=%22%2300d1ff%22 stroke=%22%2300d1ff%22/%3E%3Ccircle cx=%2236%22 cy=%2212%22 r=%223%22 fill=%22%2300d1ff%22 stroke=%22%2300d1ff%22/%3E%3Ccircle cx=%2212%22 cy=%2236%22 r=%223%22 fill=%22%2300d1ff%22 stroke=%22%2300d1ff%22/%3E%3Ccircle cx=%2236%22 cy=%2236%22 r=%223%22 fill=%22%2300d1ff%22 stroke=%22%2300d1ff%22/%3E%3C/g%3E%3C/svg%3E',
-            iconSize: [22, 22],
-            iconAnchor: [11, 11],
-            popupAnchor: [0, -20]
-        });
+const geocoder = L.Control.geocoder({ defaultMarkGeocode: false,
+                                      placeholder: 'Search address or city…' }).addTo(map);
+geocoder.on('markgeocode', e => map.fitBounds(e.geocode.bbox));
 
-        // Spawn immediately so the drone is visible even before the first GPS update
-        var liveDroneMarker = L.marker([30.0315, 72.3140], { icon: droneIcon, zIndexOffset: 1000 })
-            .addTo(map)
-            .bindPopup("Live Drone Tracking");
+// Per-drone colours so three drones are distinguishable at a glance. The old
+// map had exactly one hardcoded marker, which is all a single-drone
+// architecture could ever show.
+const COLOURS = ['#00d1ff', '#ffb300', '#b388ff', '#69f0ae', '#ff8a80',
+                 '#80d8ff', '#ccff90', '#ea80fc', '#ffd180', '#a7ffeb'];
 
-        map.on('click', function(e) {
-            if (!pickupMarker) {
-                pickupMarker = L.marker(e.latlng).addTo(map).bindPopup("Pickup (ArUco Spawns Here)").openPopup();
-            } else if (!dropMarker) {
-                dropMarker = L.marker(e.latlng).addTo(map).bindPopup("Drop-off (ArUco Spawns Here)").openPopup();
-                document.getElementById('dispatchBtn').disabled = false;
-            }
-        });
+function droneIcon(colour) {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 48 48">
+        <g fill="none" stroke="${colour}" stroke-width="3" stroke-linecap="round">
+        <path d="M24 16v16M16 24h16"/><path d="M12 12l5 5M36 12l-5 5M12 36l5-5M36 36l-5-5"/>
+        <circle cx="24" cy="24" r="6" fill="${colour}"/>
+        <circle cx="12" cy="12" r="3" fill="${colour}"/><circle cx="36" cy="12" r="3" fill="${colour}"/>
+        <circle cx="12" cy="36" r="3" fill="${colour}"/><circle cx="36" cy="36" r="3" fill="${colour}"/>
+        </g></svg>`;
+    return L.icon({ iconUrl: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg),
+                    iconSize: [26, 26], iconAnchor: [13, 13], popupAnchor: [0, -16] });
+}
 
-        // Dispatch Logic
-        document.getElementById('dispatchBtn').onclick = function() {
-            var btn = this;
-            var payload = {
-                pickup_lat: pickupMarker.getLatLng().lat, pickup_lon: pickupMarker.getLatLng().lng,
-                drop_lat: dropMarker.getLatLng().lat, drop_lon: dropMarker.getLatLng().lng
-            };
-            btn.disabled = true;
-            fetch('/dispatch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
-                .then(r => r.json())
-                .then(data => {
-                    document.getElementById('status').innerText = "Status: " + data.message;
-                    if (data.status !== "Success") btn.disabled = false;  // allow retry if queued/errored
-                })
-                .catch(err => {
-                    document.getElementById('status').innerText = "Status: Dispatch request failed";
-                    btn.disabled = false;
-                });
-        };
+const markers = {};   // drone_id -> Leaflet marker
+const trails  = {};   // drone_id -> polyline of flown positions
+let pickupPin = null, dropPin = null;
 
-        // Live Drone Tracking
-        var ws = new WebSocket("ws://" + window.location.host + "/ws");
-        ws.onmessage = function(event) {
-            var data = JSON.parse(event.data);
-            document.getElementById('status').innerText = "Status: " + data.status;
-            if (data.lat !== 0.0 && data.lon !== 0.0) {
-                liveDroneMarker.setLatLng([data.lat, data.lon]);
-            }
-        };
-    </script>
+map.on('click', e => {
+    if (!pickupPin) {
+        pickupPin = L.marker(e.latlng).addTo(map)
+            .bindPopup('Pickup — ArUco ID 0').openPopup();
+    } else if (!dropPin) {
+        dropPin = L.marker(e.latlng).addTo(map)
+            .bindPopup('Drop-off — ArUco ID 1').openPopup();
+        document.getElementById('dispatchBtn').disabled = false;
+    }
+});
+
+function showBanner(text) {
+    const el = document.getElementById('banner');
+    el.textContent = text;
+    el.style.display = text ? 'block' : 'none';
+}
+
+document.getElementById('dispatchBtn').onclick = function () {
+    const btn = this;
+    btn.disabled = true;
+    showBanner('');
+    fetch('/dispatch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            pickup_lat: pickupPin.getLatLng().lat, pickup_lon: pickupPin.getLatLng().lng,
+            drop_lat: dropPin.getLatLng().lat,     drop_lon: dropPin.getLatLng().lng,
+        }),
+    })
+    .then(r => r.json())
+    .then(data => {
+        document.getElementById('headline').textContent = data.message;
+        if (data.status === 'Error') showBanner('Dispatch rejected: ' + data.message);
+        // Re-enable unless a drone actually took the job, so a queued or
+        // rejected dispatch can be retried without reloading the page.
+        if (data.status !== 'Success') btn.disabled = false;
+    })
+    .catch(err => {
+        showBanner('Dispatch request failed: ' + err);
+        btn.disabled = false;
+    });
+};
+
+function fmt(value, digits) {
+    return (value === null || value === undefined) ? '—' : Number(value).toFixed(digits);
+}
+
+function renderFleet(drones) {
+    const body = document.getElementById('fleetRows');
+    if (!drones.length) {
+        body.innerHTML = '<tr><td colspan="7" class="detail">no drones registered</td></tr>';
+        return;
+    }
+
+    body.innerHTML = drones.map((d, i) => {
+        const colour = COLOURS[i % COLOURS.length];
+        // A drone marked BUSY with no live mission behind it is the signature
+        // of the bug this release fixes, so it is called out explicitly rather
+        // than looking identical to a drone that is flying.
+        const orphaned = d.status === 'BUSY' && !d.mission_live;
+        return `<tr>
+            <td><span style="color:${colour}">●</span> ${d.id}</td>
+            <td><span class="pill s-${d.status}">${d.status}</span>
+                ${orphaned ? '<span class="reason"> BUSY with no live mission</span>' : ''}</td>
+            <td class="detail">${d.current_job_id || '—'}</td>
+            <td class="detail">${fmt(d.lat, 6)}, ${fmt(d.lon, 6)}</td>
+            <td class="detail">${fmt(d.alt, 1)} m</td>
+            <td class="detail">${d.battery_pct === null ? '—' : fmt(d.battery_pct, 0) + '%'}</td>
+            <td class="detail">${d.detail || ''}</td>
+        </tr>`;
+    }).join('');
+
+    drones.forEach((d, i) => {
+        if (!d.lat || !d.lon) return;              // 0,0 means "no fix yet"
+        const colour = COLOURS[i % COLOURS.length];
+        const point = [d.lat, d.lon];
+        if (!markers[d.id]) {
+            markers[d.id] = L.marker(point, { icon: droneIcon(colour), zIndexOffset: 1000 })
+                .addTo(map).bindPopup(d.id);
+            trails[d.id] = L.polyline([point], { color: colour, weight: 2, opacity: 0.65 })
+                .addTo(map);
+        } else {
+            markers[d.id].setLatLng(point);
+            trails[d.id].addLatLng(point);
+        }
+        markers[d.id].setPopupContent(
+            `<b>${d.id}</b><br>${d.status}<br>${fmt(d.alt, 1)} m<br>${d.detail || ''}`);
+    });
+}
+
+function renderJobs(jobs) {
+    const body = document.getElementById('jobRows');
+    if (!jobs.length) {
+        body.innerHTML = '<tr><td colspan="4" class="detail">none yet</td></tr>';
+        return;
+    }
+    body.innerHTML = jobs.map(j => {
+        const bad = ['FAILED', 'ABORTED'].includes(j.status);
+        return `<tr>
+            <td class="detail">${j.id}</td>
+            <td><span class="pill s-${j.status}">${j.status}</span></td>
+            <td class="detail">${j.assigned_drone || '—'}</td>
+            <td class="${bad ? 'reason' : 'detail'}">${j.detail || ''}</td>
+        </tr>`;
+    }).join('');
+}
+
+// One fleet-wide socket. The old page opened /ws and streamed a module-level
+// drone_state dict — the same globals that made a fleet impossible.
+let socket;
+function connect() {
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    socket = new WebSocket(`${scheme}://${location.host}/ws`);
+
+    socket.onmessage = event => {
+        const data = JSON.parse(event.data);
+        renderFleet(data.drones || []);
+        renderJobs(data.recent_jobs || []);
+
+        const drones = data.drones || [];
+        const busy = drones.filter(d => d.status === 'BUSY').length;
+        document.getElementById('fleetSummary').textContent =
+            `${busy}/${drones.length} flying` + (data.queued ? `, ${data.queued} queued` : '');
+
+        const failed = (data.recent_jobs || []).find(
+            j => ['FAILED', 'ABORTED'].includes(j.status) && j.detail);
+        showBanner(failed ? `Last failure (${failed.id}): ${failed.detail}` : '');
+    };
+
+    // Reconnect rather than silently freezing: a dead socket looks exactly like
+    // a fleet that has stopped moving.
+    socket.onclose = () => {
+        document.getElementById('fleetSummary').textContent = 'reconnecting…';
+        setTimeout(connect, 2000);
+    };
+}
+connect();
+</script>
 </body>
 </html>

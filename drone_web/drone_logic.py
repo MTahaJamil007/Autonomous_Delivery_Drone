@@ -1,528 +1,93 @@
+"""The per-drone entry point the dispatcher calls. Thin by design.
+
+WHAT THIS FILE USED TO BE
+-------------------------
+528 lines that were the code that actually flew, in parallel with the 1,800
+lines in drone_agent/ that nothing imported. Two implementations of the same
+system, of which the richer one -- with the FSM, marker disambiguation, payload
+bay, safety supervisor, battery gating and escalation -- was dead. Every
+documented feature lived in the copy that never ran.
+
+The governing decision in the remediation plan was to make drone_agent/ the
+mission core and reduce this file to an orchestrator. Concretely, what left:
+
+* THE DUPLICATE CONSTANTS. Lines 41-50 re-declared TARGET_ALT, CRUISE_SPEED,
+  SLOW_RADIUS_M, MIN_SPEED, ARRIVAL_M, DODGE_SPEED, BACK_SPEED, ALT_GAIN,
+  ALT_MAX_VEL and NAV_HZ at module scope. config.py claimed to centralise
+  tuning; editing it changed nothing about what flew. This was the single most
+  confusing property of the codebase. There are now zero tunables here --
+  `make check` greps for their return.
+
+* THE MODULE-LEVEL STATE. drone_state, vision_data and lidar_data as module
+  globals are what actually limited the system to one drone: a second drone in
+  the same process would overwrite the first's telemetry. They are now instance
+  attributes on DroneMission.
+
+* THE DUPLICATED GEOMETRY. get_distance_m, get_bearing and bearing_to_ned were
+  three of the ten copies of those formulas. One copy now lives in
+  drone_agent/geo.py.
+
+* THE BLOCKING GAZEBO CALLS. spawn_gazebo_marker used subprocess.run from an
+  async context, which stalls the offboard setpoint stream (finding F5), and
+  spawned `model://arucotag` for all three pads -- a texture that decodes in
+  none of OpenCV's 27 dictionaries (finding F1).
+
+What remains is the contract, and only the contract.
 """
-drone_logic.py  –  V5 "NED-Frame" Architecture
-================================================
-Root-cause fixes for every failure seen in the logs:
 
-PROBLEM 1 – goto_location() + set_velocity_body() mode thrashing
-  Every avoidance event switched PX4 between HOLD and OFFBOARD rapidly.
-  PX4 cannot handle rapid mode thrashing → "invalid setpoints" → blind land.
-  FIX: Stay in OFFBOARD mode for the ENTIRE flight leg. Use VelocityNedYaw
-  (world-frame) for navigation. Never call goto_location() again.
+from __future__ import annotations
 
-PROBLEM 2 – Hard braking → nose pitches up → 2D LiDAR stares at sky →
-  reports ∞ → avoider says CLEAR → drone lunges forward → crash loop.
-  FIX: Use NED-frame velocities. We command the WORLD FRAME, not the body
-  frame. The drone's nose pitch is irrelevant to a world-frame velocity
-  setpoint. No braking = no pitch spike = no sky blindness.
+import logging
+from typing import Any
 
-PROBLEM 3 – Drone flew backwards on return trip (yaw=0 hardcoded).
-  FIX: Dynamic bearing calculated each control tick so the nose always faces
-  the target. In NED mode, yaw is just cosmetic – avoidance still works.
+from drone_agent import mission as mission_core
+from drone_agent.contracts import DeliveryJob, MissionResult
 
-PROBLEM 4 – Attitude failure (roll) / EKF failure during aggressive manoeuvres.
-  FIX: Max cruise speed capped at 4 m/s. Avoidance is a gentle sideways
-  velocity nudge – no deceleration impulse that can stress the EKF.
-
-PROBLEM 5 – GPS arrival tolerance too coarse / too tight.
-  FIX: Arrival is checked in METRES (proper haversine-style conversion), not
-  raw decimal-degrees. Stops at 2.0 m from target.
-"""
-
-import asyncio
-import math
-import socket
-import subprocess
-import time
-
-from mavsdk import System
-from mavsdk.offboard import OffboardError, VelocityNedYaw, VelocityBodyYawspeed
-
-# ── mission constants ────────────────────────────────────────────────────────
-TARGET_ALT      = 10.0     # m  – cruise / takeoff altitude
-CRUISE_SPEED    = 3.5      # m/s – maximum forward speed
-SLOW_RADIUS_M   = 12.0     # m  – start slowing when this close to target
-MIN_SPEED       = 0.8      # m/s – minimum approach speed (never fully stall)
-ARRIVAL_M       = 2.0      # m  – "close enough" to declare arrival
-DODGE_SPEED     = 2.5      # m/s – sideways dodge speed
-BACK_SPEED      = 0.4      # m/s – tiny rearward component while dodging
-ALT_GAIN        = 0.25     # altitude correction P-gain
-ALT_MAX_VEL     = 0.5      # m/s – max vertical correction
-NAV_HZ          = 10       # Hz  – navigation control loop rate
-# ────────────────────────────────────────────────────────────────────────────
-
-# shared state dictionaries (written by background tasks)
-drone_state = {"lat": 0.0, "lon": 0.0, "alt": 0.0, "status": "Idle"}
-vision_data = {"err_x": 0, "err_y": 0, "id": -1, "locked": False}
-lidar_data  = {"action": "CLEAR"}
+logger = logging.getLogger(__name__)
 
 
-# ════════════════════════════════════════════════════════════════════════════
-#  GEOMETRY HELPERS
-# ════════════════════════════════════════════════════════════════════════════
+async def execute_delivery(job: DeliveryJob, drone_id: str) -> MissionResult:
+    """Fly one delivery job on one drone.
 
-def get_distance_m(lat1, lon1, lat2, lon2):
-    """Flat-earth distance in metres (accurate within ~10 km)."""
-    d_lat = (lat2 - lat1) * 111_320.0
-    d_lon = (lon2 - lon1) * (111_320.0 * math.cos(math.radians(lat1)))
-    return math.hypot(d_lat, d_lon)
+    Args:
+        job: The delivery request. A dataclass, not four loose floats -- the
+            dispatcher used to call this with five positional arguments against
+            a four-parameter definition, the TypeError was swallowed by a broad
+            `except`, and the job was recorded as COMPLETED. Four same-typed
+            floats in a row is a signature no reviewer and no tool can check.
+        drone_id: Which drone flies it. Determines the MAVLink port, both UDP
+            sensor ports, the gRPC port and the Gazebo model name.
 
-
-def get_bearing(lat1, lon1, lat2, lon2):
-    """Compass bearing in degrees (0 = North, 90 = East)."""
-    lat1_r = math.radians(lat1)
-    lat2_r = math.radians(lat2)
-    dlon   = math.radians(lon2 - lon1)
-    x = math.sin(dlon) * math.cos(lat2_r)
-    y = (math.cos(lat1_r) * math.sin(lat2_r)
-         - math.sin(lat1_r) * math.cos(lat2_r) * math.cos(dlon))
-    return (math.degrees(math.atan2(x, y)) + 360) % 360
-
-
-def bearing_to_ned(bearing_deg, speed_ms):
-    """Convert compass bearing + speed → (north_m_s, east_m_s)."""
-    r = math.radians(bearing_deg)
-    return speed_ms * math.cos(r), speed_ms * math.sin(r)
-
-
-def dodge_ned(bearing_deg, action):
+    Returns:
+        A MissionResult carrying a terminal status, a human-readable reason and
+        the per-leg outcomes. Does not raise for flight failures -- those are
+        results, not exceptions -- but does propagate CancelledError so an
+        operator abort stays distinguishable from a crash.
     """
-    Return (north, east) velocity for a sideways dodge, PLUS a tiny backward
-    component to maintain separation from the wall.
-
-    LEFT/RIGHT are from the drone's perspective (i.e. relative to its bearing).
-    """
-    fwd_r  = math.radians(bearing_deg)
-
-    if action == "DODGE_LEFT":
-        side_r = math.radians(bearing_deg - 90.0)
-    else:                                          # DODGE_RIGHT
-        side_r = math.radians(bearing_deg + 90.0)
-
-    # sideways
-    n = DODGE_SPEED * math.cos(side_r)
-    e = DODGE_SPEED * math.sin(side_r)
-
-    # tiny rearward component
-    n -= BACK_SPEED * math.cos(fwd_r)
-    e -= BACK_SPEED * math.sin(fwd_r)
-
-    return n, e
-
-
-def altitude_correction():
-    """Small down-velocity correction to hold TARGET_ALT (NED: negative = up)."""
-    err = TARGET_ALT - drone_state["alt"]           # positive → drone too low
-    raw = -err * ALT_GAIN                            # negative → ascend
-    return max(-ALT_MAX_VEL, min(ALT_MAX_VEL, raw))
-
-
-# ════════════════════════════════════════════════════════════════════════════
-#  SIMULATION HELPERS
-# ════════════════════════════════════════════════════════════════════════════
-
-def spawn_gazebo_marker(name, target_lat, target_lon, home_lat, home_lon):
-    d_lat  = target_lat - home_lat
-    d_lon  = target_lon - home_lon
-    y_north = d_lat * 111_320.0
-    x_east  = d_lon * (111_320.0 * math.cos(math.radians(home_lat)))
-
-    print(f"[ENV] Spawning {name:15s} at X(E)={x_east:7.2f} m  Y(N)={y_north:7.2f} m")
-    cmd = (
-        f"gz service -s /world/default/create "
-        f"--reqtype gz.msgs.EntityFactory "
-        f"--reptype gz.msgs.Boolean "
-        f"--timeout 1000 "
-        f"--req 'sdf_filename: \"model://arucotag\", "
-        f"name: \"{name}\", "
-        f"pose: {{position: {{x: {x_east}, y: {y_north}, z: 0.1}}}}'"
+    logger.info(
+        "dispatch accepted: job %s on %s, pickup (%.6f, %.6f) -> drop (%.6f, %.6f)",
+        job.job_id, drone_id,
+        job.pickup_lat, job.pickup_lon, job.drop_lat, job.drop_lon,
     )
-    subprocess.run(cmd, shell=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return await mission_core.DroneMission(drone_id).run(job)
 
 
-# ════════════════════════════════════════════════════════════════════════════
-#  BACKGROUND LISTENER TASKS
-# ════════════════════════════════════════════════════════════════════════════
+def get_state_snapshot(drone_id: str) -> dict[str, Any]:
+    """Live telemetry for a drone, or a zeroed snapshot if it is not flying.
 
-async def telemetry_monitor(drone):
-    """Continuously update drone_state from MAVSDK telemetry."""
-    async for pos in drone.telemetry.position():
-        drone_state["lat"] = pos.latitude_deg
-        drone_state["lon"] = pos.longitude_deg
-        drone_state["alt"] = pos.relative_altitude_m
+    THIS FUNCTION IS THE ORIGINAL DISPATCH BLOCKER. fleet_dispatch/app.py
+    imported it from inside run_drone_task and above that function's `try:`; it
+    did not exist, so every dispatch raised ImportError before the try block,
+    the `finally: complete_job(...)` never ran, and the drone stayed BUSY
+    forever. Three dispatches emptied a three-drone fleet, each reported to the
+    operator as successfully assigned.
 
-
-async def vision_listener():
-    """Receive UDP datagrams from the vision/ArUco broadcaster."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("127.0.0.1", 5005))
-    sock.setblocking(False)
-    while True:
-        try:
-            data, _ = sock.recvfrom(1024)
-            msg = data.decode().strip()
-            if msg == "None":
-                vision_data["locked"] = False
-            else:
-                parts = msg.split(",")
-                if len(parts) == 3:
-                    vision_data["err_x"] = int(parts[0])
-                    vision_data["err_y"] = int(parts[1])
-                    vision_data["id"]    = int(parts[2])
-                    vision_data["locked"] = True
-        except BlockingIOError:
-            pass
-        except Exception:
-            pass
-        await asyncio.sleep(0.05)
-
-
-async def lidar_listener():
-    """Receive UDP datagrams from avoider_node (CLEAR / DODGE_LEFT / DODGE_RIGHT)."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("127.0.0.1", 5006))
-    sock.setblocking(False)
-    while True:
-        try:
-            data, _ = sock.recvfrom(1024)
-            lidar_data["action"] = data.decode().strip()
-        except BlockingIOError:
-            pass
-        except Exception:
-            pass
-        await asyncio.sleep(0.05)   # 20 Hz read rate
-
-
-# ════════════════════════════════════════════════════════════════════════════
-#  TAKEOFF HELPER
-# ════════════════════════════════════════════════════════════════════════════
-
-async def arm_and_takeoff(drone):
+    Never raises. The dispatcher polls this every two seconds for drones that
+    may well be idle, and a telemetry read must not be able to end a flight.
     """
-    Arm, command auto-takeoff to TARGET_ALT, then wait until the drone
-    actually reaches that altitude before returning.
-    """
-    drone_state["status"] = "Arming"
-    print("[TAKEOFF] Arming…")
-    await drone.action.set_takeoff_altitude(TARGET_ALT)
-    await drone.action.arm()
-    await asyncio.sleep(1.0)
-
-    print(f"[TAKEOFF] Taking off to {TARGET_ALT} m…")
-    await drone.action.takeoff()
-
-    # Wait for altitude – check every 0.5 s
-    while True:
-        alt = drone_state["alt"]
-        if alt >= TARGET_ALT - 1.5:
-            break
-        print(f"[TAKEOFF]  alt = {alt:.1f} m  (target {TARGET_ALT} m)…")
-        await asyncio.sleep(0.5)
-
-    # Brief stabilisation pause
-    await asyncio.sleep(2.0)
-    print("[TAKEOFF] Altitude reached. Ready for offboard control.")
+    return mission_core.get_state_snapshot(drone_id)
 
 
-# ════════════════════════════════════════════════════════════════════════════
-#  CORE NAVIGATION  –  NED VELOCITY OFFBOARD LOOP
-# ════════════════════════════════════════════════════════════════════════════
-
-async def navigate_with_avoidance(drone, target_lat, target_lon):
-    """
-    Fly to (target_lat, target_lon) in OFFBOARD mode using world-frame
-    (NED) velocity setpoints.
-
-    Why NED frame?
-    ──────────────
-    Body-frame commands (VelocityBodyYawspeed) are relative to where the
-    drone's NOSE is pointing.  When PX4 brakes, the nose pitches up.
-    A 2-D LiDAR mounted flat then stares at the sky, returns ∞, and the
-    avoider incorrectly declares the path clear.
-
-    NED commands are always in the WORLD frame.  A pitching nose has zero
-    effect on a north/east/down velocity command – PX4's attitude controller
-    works out the required tilt internally.  This completely eliminates
-    pitch-blindness.
-
-    Control law
-    ───────────
-    • Proportional speed (slow down smoothly near target).
-    • When avoider says DODGE_*: replace the forward NED component with a
-      perpendicular one – no mode switch, no braking impulse.
-    • Altitude held via a small P-controller on the down axis.
-    • 10 Hz loop (fast enough for responsive avoidance).
-    """
-    print(f"\n[NAV] Navigating to ({target_lat:.6f}, {target_lon:.6f})")
-    drone_state["status"] = "Navigating"
-
-    # ── prime offboard with a zero setpoint, then start it ──────────────────
-    zero = VelocityNedYaw(0.0, 0.0, 0.0, 0.0)
-    await drone.offboard.set_velocity_ned(zero)
-    try:
-        await drone.offboard.start()
-    except OffboardError as e:
-        print(f"[NAV] Offboard start error (may already be running): {e}")
-
-    dt = 1.0 / NAV_HZ
-
-    while True:
-        # ── arrival check ────────────────────────────────────────────────────
-        dist_m = get_distance_m(
-            drone_state["lat"], drone_state["lon"],
-            target_lat, target_lon
-        )
-
-        if dist_m <= ARRIVAL_M:
-            # Hover in place to stabilise before landing
-            await drone.offboard.set_velocity_ned(zero)
-            await asyncio.sleep(0.5)
-            print(f"[NAV] Arrived at target ({dist_m:.1f} m).")
-            await drone.offboard.stop()
-            return
-
-        # ── compute bearing & proportional cruise speed ─────────────────────
-        bearing = get_bearing(
-            drone_state["lat"], drone_state["lon"],
-            target_lat, target_lon
-        )
-        speed = min(CRUISE_SPEED,
-                    max(MIN_SPEED, CRUISE_SPEED * (dist_m / SLOW_RADIUS_M)))
-
-        # ── pick NED velocity based on lidar state ───────────────────────────
-        action = lidar_data["action"]
-
-        if action != "CLEAR":
-            # ── AVOIDANCE ───────────────────────────────────────────────────
-            drone_state["status"] = f"EVADING ({action})"
-            n_vel, e_vel = dodge_ned(bearing, action)
-            d_vel = altitude_correction()
-            await drone.offboard.set_velocity_ned(
-                VelocityNedYaw(n_vel, e_vel, d_vel, bearing)
-            )
-
-        else:
-            # ── CRUISE toward target ────────────────────────────────────────
-            drone_state["status"] = f"Navigating  dist={dist_m:.0f} m"
-            n_vel, e_vel = bearing_to_ned(bearing, speed)
-            d_vel = altitude_correction()
-            await drone.offboard.set_velocity_ned(
-                VelocityNedYaw(n_vel, e_vel, d_vel, bearing)
-            )
-
-        await asyncio.sleep(dt)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-#  PRECISION LANDING  –  BODY-FRAME VISION LOOP
-# ════════════════════════════════════════════════════════════════════════════
-
-async def execute_precision_landing(drone, expected_marker_id):
-    """
-    Descend onto an ArUco marker using body-frame velocity offboard control.
-
-    We ENTER offboard mode here from a stopped hover, so no mode conflict.
-    The loop runs at ~10 Hz and drives the drone's centroid onto the marker
-    using a simple P-controller on the pixel error from the camera feed.
-    """
-    drone_state["status"] = f"Precision landing (Marker {expected_marker_id})"
-    print(f"\n[LAND] Hunting for Marker ID {expected_marker_id}…")
-
-    K_p             = 0.015   # proportional gain (pixels → m/s)
-    CENTRE_THRESH   = 20      # pixel  – "centred enough" to start descending
-    DESCEND_VZ      = 0.4     # m/s  – normal descent speed (positive = down)
-    FAST_DESCEND    = 0.8     # m/s  – descent speed when perfectly centred
-    TIMEOUT_S       = 45
-
-    # enter offboard (hover)
-    await drone.offboard.set_velocity_body(
-        VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0)
-    )
-    await drone.offboard.start()
-
-    start_t = time.time()
-
-    while True:
-        elapsed = time.time() - start_t
-
-        # ── timeout failsafe ─────────────────────────────────────────────────
-        if elapsed > TIMEOUT_S:
-            print(f"[LAND] TIMEOUT – Marker {expected_marker_id} not found. "
-                  f"Climbing to cruise altitude.")
-            await drone.offboard.stop()
-            await drone.action.set_takeoff_altitude(TARGET_ALT)
-            await drone.action.takeoff()
-            await asyncio.sleep(6)
-            return False
-
-        # ── vision control ───────────────────────────────────────────────────
-        if vision_data["locked"] and vision_data["id"] == expected_marker_id:
-            ex = vision_data["err_x"]
-            ey = vision_data["err_y"]
-
-            # camera frame → body frame (depends on camera orientation)
-            # Adjust signs if your camera is rotated differently
-            vx = -ey * K_p   # forward/backward
-            vy =  ex * K_p   # left/right
-
-            centred = abs(ex) < CENTRE_THRESH and abs(ey) < CENTRE_THRESH
-            vz = FAST_DESCEND if centred else DESCEND_VZ
-
-            # clamp horizontal speed
-            vx = max(-1.5, min(1.5, vx))
-            vy = max(-1.5, min(1.5, vy))
-
-            await drone.offboard.set_velocity_body(
-                VelocityBodyYawspeed(vx, vy, vz, 0.0)
-            )
-        else:
-            # no marker in view – rotate slowly to search
-            await drone.offboard.set_velocity_body(
-                VelocityBodyYawspeed(0.0, 0.0, 0.15, 10.0)
-            )
-
-        # ── touchdown detection ──────────────────────────────────────────────
-        # Read ONE telemetry sample non-blockingly
-        async for pos in drone.telemetry.position():
-            if pos.relative_altitude_m < 0.30:
-                print(f"[LAND] Touchdown!  Cutting motors…")
-                await drone.offboard.stop()
-                try:
-                    await asyncio.wait_for(drone.action.land(), timeout=3.0)
-                except Exception:
-                    pass
-
-                # wait for disarm
-                async for armed in drone.telemetry.armed():
-                    if not armed:
-                        break
-                print(f"[LAND] ✅  Marker {expected_marker_id} secured. Disarmed.")
-                return True
-            break   # only take the first item
-
-        await asyncio.sleep(0.1)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-#  MISSION ORCHESTRATOR
-# ════════════════════════════════════════════════════════════════════════════
-
-async def execute_delivery(pickup_lat, pickup_lon, drop_lat, drop_lon):
-    """
-    Full autonomous delivery mission:
-      1. Takeoff
-      2. Fly to pickup   → precision land on Marker 0
-      3. Fly to drop-off → precision land on Marker 0
-      4. Return home     → precision land on Marker 0
-    """
-    # ── connect ──────────────────────────────────────────────────────────────
-    drone = System()
-    drone_state["status"] = "Connecting…"
-    print("[MISSION] Connecting to drone…")
-    
-    # Try common MAVLink connection strings
-    connection_strings = [
-        "udp://:14540",              # PX4 SITL default
-        "udpin://0.0.0.0:14540",     # Alternative format
-        "udp://127.0.0.1:14540"      # Localhost explicit
-    ]
-    
-    connected = False
-    for conn_str in connection_strings:
-        print(f"[MISSION] Trying connection: {conn_str}")
-        await drone.connect(system_address=conn_str)
-        
-        # Wait up to 5 seconds for connection
-        try:
-            async for state in drone.core.connection_state():
-                if state.is_connected:
-                    print(f"[MISSION] ✅ Connected via {conn_str}")
-                    connected = True
-                    break
-                await asyncio.sleep(0.1)
-                # Timeout after trying this connection
-                break
-        except Exception as e:
-            print(f"[MISSION] Connection attempt failed: {e}")
-            continue
-        
-        if connected:
-            break
-    
-    if not connected:
-        error_msg = "Failed to connect to drone. Ensure PX4 SITL is running with MAVLink on UDP port 14540"
-        print(f"[MISSION] ❌ {error_msg}")
-        drone_state["status"] = "Connection Failed"
-        raise ConnectionError(error_msg)
-
-    # Wait for a valid GPS fix
-    print("[MISSION] Waiting for GPS fix…")
-    async for health in drone.telemetry.health():
-        if health.is_global_position_ok:
-            print("[MISSION] GPS OK.")
-            break
-
-    # ── start background tasks ───────────────────────────────────────────────
-    asyncio.create_task(telemetry_monitor(drone))
-    asyncio.create_task(vision_listener())
-    asyncio.create_task(lidar_listener())
-
-    # give telemetry a moment to populate drone_state
-    await asyncio.sleep(2.0)
-
-    home_lat = drone_state["lat"]
-    home_lon = drone_state["lon"]
-    print(f"[MISSION] Home position: ({home_lat:.7f}, {home_lon:.7f})")
-
-    # ── spawn simulation markers ─────────────────────────────────────────────
-    spawn_gazebo_marker("pickup_pad", pickup_lat,  pickup_lon,  home_lat, home_lon)
-    spawn_gazebo_marker("drop_pad",   drop_lat,    drop_lon,    home_lat, home_lon)
-    spawn_gazebo_marker("home_pad",   home_lat,    home_lon,    home_lat, home_lon)
-
-    # ═══════════════════════════════════════════════════════════════════════
-    #  LEG 1 – PICKUP
-    # ═══════════════════════════════════════════════════════════════════════
-    print("\n" + "═" * 60)
-    print("  LEG 1 / 3  →  FLY TO PICKUP")
-    print("═" * 60)
-
-    await arm_and_takeoff(drone)
-    drone_state["status"] = "Flying to Pickup"
-    await navigate_with_avoidance(drone, pickup_lat, pickup_lon)
-
-    landed = await execute_precision_landing(drone, 0)
-    if landed:
-        print("[MISSION] Package picked up. Waiting 5 s…")
-        await asyncio.sleep(5.0)
-
-    # ═══════════════════════════════════════════════════════════════════════
-    #  LEG 2 – DROP-OFF
-    # ═══════════════════════════════════════════════════════════════════════
-    print("\n" + "═" * 60)
-    print("  LEG 2 / 3  →  FLY TO DROP-OFF")
-    print("═" * 60)
-
-    await arm_and_takeoff(drone)
-    drone_state["status"] = "Flying to Drop-off"
-    await navigate_with_avoidance(drone, drop_lat, drop_lon)
-
-    landed = await execute_precision_landing(drone, 0)
-    if landed:
-        print("[MISSION] Package delivered. Waiting 5 s…")
-        await asyncio.sleep(5.0)
-
-    # ═══════════════════════════════════════════════════════════════════════
-    #  LEG 3 – RETURN HOME
-    # ═══════════════════════════════════════════════════════════════════════
-    print("\n" + "═" * 60)
-    print("  LEG 3 / 3  →  RETURN HOME")
-    print("═" * 60)
-
-    await arm_and_takeoff(drone)
-    drone_state["status"] = "Returning Home"
-    await navigate_with_avoidance(drone, home_lat, home_lon)
-
-    await execute_precision_landing(drone, 0)
-
-    drone_state["status"] = "Mission Complete ✅"
-    print("\n[MISSION] ✅  All legs complete.  Mission SUCCESS.")
+def active_drones() -> list[str]:
+    """Drone ids with a live mission in this process."""
+    return mission_core.registered_drones()

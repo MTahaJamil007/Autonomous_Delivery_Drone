@@ -1,416 +1,518 @@
-"""
-Navigation module - NED-frame velocity control for waypoint navigation with avoidance.
+"""Waypoint navigation with reactive avoidance and planned detours.
 
-Migrated from drone_logic.py V3 block with FSM event integration.
+Flies world-frame (NED) velocity setpoints by mutating the shared Setpoint that
+SetpointPublisher streams. Nothing here talks to the offboard plugin.
+
+WHY NED AND NOT BODY FRAME
+--------------------------
+Body-frame velocity is relative to where the nose points. When PX4 brakes, the
+nose pitches up; a flat-mounted 2D LiDAR then stares at the sky, returns
+infinity, and the avoider declares the path clear -- so the drone lunges forward
+into the wall it was braking for, brakes again, and ping-pongs until it crashes.
+A world-frame command is unaffected by attitude: PX4 works out the tilt itself.
+
+FIXES IN THIS REWRITE
+---------------------
+P3.6 - Obstacle reports were unreachable. The old code did
+
+           if action != last_action:
+               last_action = action          # <-- assigned here
+           if action != last_action and action in ("DODGE_LEFT", ...):
+               report_obstacle(...)          # <-- so this is never true
+
+       The second condition tested a variable the first had just made equal.
+       Every dodge went unreported, so fleet obstacle memory stayed empty and
+       "obstacles persisted between missions" could not happen. Fixed by
+       capturing the previous action before reassigning.
+
+P3.6 - The report task was fire-and-forget: `asyncio.create_task(...)` with no
+       reference kept. An unreferenced task can be garbage-collected before it
+       finishes, and its exception is swallowed. References are now held and
+       exceptions logged.
+
+P3.7 - Velocity blending was a tick countdown. Replaced with an acceleration
+       limit, which is the physically meaningful constraint, matches
+       MPC_ACC_HOR, and behaves correctly when the action changes mid-blend --
+       a counter restarts and produces a discontinuity.
+
+P5.1 - ESCALATE was a TODO that logged a warning and kept flying at the wall,
+       which is the worst available behaviour. It now plans a detour.
+
+P5.2 - Reports are deduplicated within config.OBSTACLE_REPORT_DEDUPE_M and
+       placed where the obstacle actually is -- the drone's position projected
+       along its heading by the measured clear distance -- rather than at the
+       drone, which biased every stored obstacle toward the approach path.
+
+P2.4 - All durations use time.monotonic().
 """
+
+from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import time
-import logging
-from typing import Tuple, Dict, Any, Callable
-from mavsdk import System
-from mavsdk.offboard import OffboardError, VelocityNedYaw
+from collections.abc import Callable
+from typing import Any
 
-import sys
-from pathlib import Path
 import config
+from drone_agent import geo, udp_receiver
+from drone_agent.setpoint import SetpointPublisher
 
 logger = logging.getLogger(__name__)
 
 
-# ════════════════════════════════════════════════════════════════════════════
-#  FIXED-RATE CONTROL LOOP
-# ════════════════════════════════════════════════════════════════════════════
+class NavOutcome:
+    """Why a navigation call returned. Strings so they can go straight into logs."""
 
-async def fixed_rate_loop(hz: float, tick_fn: Callable) -> None:
+    ARRIVED = "arrived"
+    ESCALATION_EXHAUSTED = "escalation_exhausted"
+    SENSOR_LOST = "sensor_lost"
+    TIMEOUT = "timeout"
+    CANCELLED = "cancelled"
+
+
+class ObstacleReporter:
+    """Reports discovered obstacles once each, at the right place.
+
+    Per-mission, so the dedupe memory is scoped to one flight: an obstacle
+    re-encountered on a later mission should be reported again, because that
+    second sighting is what raises its confidence in the shared database.
     """
-    Execute tick_fn at a fixed rate with drift compensation.
-    
-    Unlike asyncio.sleep(dt) which accumulates drift, this scheduler uses
-    monotonic time to maintain consistent loop timing over long durations.
-    
-    Args:
-        hz: Target frequency in Hertz
-        tick_fn: Async function to call each tick (should return False to stop loop)
+
+    def __init__(self, drone_id: str, dedupe_m: float = config.OBSTACLE_REPORT_DEDUPE_M):
+        self._drone_id = drone_id
+        self._dedupe_m = dedupe_m
+        self._reported: list[tuple[float, float]] = []
+        # Strong references: an unreferenced task can be collected mid-flight.
+        self._tasks: set[asyncio.Task] = set()
+        self.reports_sent = 0
+        self.reports_suppressed = 0
+
+    def should_report(self, lat: float, lon: float) -> bool:
+        """False if we already reported something within the dedupe radius.
+
+        A 30 m wall generates a dodge lasting many seconds. Without this, every
+        tick of that dodge would post a new row and one wall would become fifty
+        obstacles, each with low confidence, none of them useful to a planner.
+        """
+        for prev_lat, prev_lon in self._reported:
+            if geo.get_distance_m(lat, lon, prev_lat, prev_lon) < self._dedupe_m:
+                self.reports_suppressed += 1
+                return False
+        return True
+
+    def report(
+        self,
+        drone_lat: float,
+        drone_lon: float,
+        heading_deg: float,
+        clear_distance_m: float,
+        radius_m: float = config.OBSTACLE_DEFAULT_RADIUS_M,
+    ) -> None:
+        """Report the obstacle AHEAD of the drone, not the drone's own position.
+
+        The LiDAR measured `clear_distance_m` of free space along the heading,
+        so the obstacle is at least that far away. Storing the drone's own
+        coordinates instead -- as the previous code did -- puts every obstacle
+        up to SAFE_DIST metres short of its true position, systematically on the
+        approach side. A planner using those positions routes around empty air
+        and still clips the wall.
+        """
+        obstacle_lat, obstacle_lon = geo.offset_bearing(
+            drone_lat, drone_lon, heading_deg, max(clear_distance_m, 0.5)
+        )
+
+        if not self.should_report(obstacle_lat, obstacle_lon):
+            return
+
+        self._reported.append((obstacle_lat, obstacle_lon))
+        self.reports_sent += 1
+
+        from drone_agent.obstacle_client import report_obstacle
+
+        task = asyncio.create_task(
+            report_obstacle(
+                lat=obstacle_lat,
+                lon=obstacle_lon,
+                source_drone=self._drone_id,
+                radius_m=radius_m,
+                obstacle_type="static_wall",
+                confidence=0.5,
+            ),
+            name=f"report-obstacle-{self.reports_sent}",
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._on_report_done)
+
+        logger.info(
+            "[%s] obstacle reported at (%.6f, %.6f), %.1f m ahead on bearing %.0f",
+            self._drone_id, obstacle_lat, obstacle_lon, clear_distance_m, heading_deg,
+        )
+
+    def _on_report_done(self, task: asyncio.Task) -> None:
+        """Log what a report task did instead of letting it vanish silently."""
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("[%s] obstacle report failed: %s", self._drone_id, exc)
+
+    async def drain(self, timeout_s: float = 3.0) -> None:
+        """Wait for in-flight reports at mission end so none are lost on exit."""
+        if not self._tasks:
+            return
+        await asyncio.wait(set(self._tasks), timeout=timeout_s)
+
+
+def altitude_correction(
+    current_alt_m: float, target_alt_m: float = config.TARGET_ALT_M
+) -> float:
+    """Down-velocity to hold an altitude. NED: negative climbs."""
+    error_m = target_alt_m - current_alt_m           # positive: too low
+    return geo.clamp(
+        -error_m * config.ALT_GAIN,
+        -config.ALT_MAX_VEL_M_S,
+        config.ALT_MAX_VEL_M_S,
+    )
+
+
+def cruise_speed_for_distance(distance_m: float) -> float:
+    """Proportional approach speed: full cruise far out, tapering near the target."""
+    return min(
+        config.CRUISE_SPEED_M_S,
+        max(
+            config.MIN_SPEED_M_S,
+            config.CRUISE_SPEED_M_S * (distance_m / config.SLOW_RADIUS_M),
+        ),
+    )
+
+
+def dodge_velocity(bearing_deg: float, action: str) -> tuple[float, float]:
+    """Sideways NED velocity for a dodge, plus a small rearward component.
+
+    The rearward component maintains separation while sliding along the
+    obstacle. It is small (config.BACK_SPEED_M_S) because a large one turns a
+    dodge into a retreat and the drone never gets past the wall.
     """
-    period = 1.0 / hz
-    next_tick = time.monotonic()
-    
-    while True:
-        # Execute the tick function
-        should_continue = await tick_fn()
-        if should_continue is False:
-            break
-        
-        # Calculate next tick time
-        next_tick += period
-        
-        # Sleep until next tick (compensates for processing time and drift)
-        sleep_time = next_tick - time.monotonic()
-        if sleep_time > 0:
-            await asyncio.sleep(sleep_time)
-        else:
-            # We're running behind schedule - log warning and catch up
-            if sleep_time < -period:
-                logger.warning(f"Control loop behind schedule by {-sleep_time:.3f}s")
+    forward_rad = math.radians(bearing_deg)
+    side_deg = bearing_deg - 90.0 if action == "DODGE_LEFT" else bearing_deg + 90.0
+    side_rad = math.radians(side_deg)
+
+    north = (
+        config.DODGE_SPEED_M_S * math.cos(side_rad)
+        - config.BACK_SPEED_M_S * math.cos(forward_rad)
+    )
+    east = (
+        config.DODGE_SPEED_M_S * math.sin(side_rad)
+        - config.BACK_SPEED_M_S * math.sin(forward_rad)
+    )
+    return north, east
 
 
-# ════════════════════════════════════════════════════════════════════════════
-#  GEOMETRY HELPERS
-# ════════════════════════════════════════════════════════════════════════════
-
-def get_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Flat-earth distance in metres (accurate within ~10 km)."""
-    d_lat = (lat2 - lat1) * 111_320.0
-    d_lon = (lon2 - lon1) * (111_320.0 * math.cos(math.radians(lat1)))
-    return math.hypot(d_lat, d_lon)
-
-
-def get_bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Compass bearing in degrees (0 = North, 90 = East)."""
-    lat1_r = math.radians(lat1)
-    lat2_r = math.radians(lat2)
-    dlon = math.radians(lon2 - lon1)
-    x = math.sin(dlon) * math.cos(lat2_r)
-    y = (math.cos(lat1_r) * math.sin(lat2_r)
-         - math.sin(lat1_r) * math.cos(lat2_r) * math.cos(dlon))
-    return (math.degrees(math.atan2(x, y)) + 360) % 360
-
-
-def bearing_to_ned(bearing_deg: float, speed_ms: float) -> Tuple[float, float]:
-    """Convert compass bearing + speed → (north_m_s, east_m_s)."""
-    r = math.radians(bearing_deg)
-    return speed_ms * math.cos(r), speed_ms * math.sin(r)
-
-
-def dodge_ned(bearing_deg: float, action: str) -> Tuple[float, float]:
-    """
-    Return (north, east) velocity for a sideways dodge, PLUS a tiny backward
-    component to maintain separation from the wall.
-
-    LEFT/RIGHT are from the drone's perspective (i.e. relative to its bearing).
-    """
-    fwd_r = math.radians(bearing_deg)
-
-    if action == "DODGE_LEFT":
-        side_r = math.radians(bearing_deg - 90.0)
-    else:  # DODGE_RIGHT
-        side_r = math.radians(bearing_deg + 90.0)
-
-    # sideways
-    n = config.DODGE_SPEED * math.cos(side_r)
-    e = config.DODGE_SPEED * math.sin(side_r)
-
-    # tiny rearward component
-    n -= config.BACK_SPEED * math.cos(fwd_r)
-    e -= config.BACK_SPEED * math.sin(fwd_r)
-
-    return n, e
-
-
-def blend_velocity(
-    current: Tuple[float, float],
-    target: Tuple[float, float],
-    t: float
-) -> Tuple[float, float]:
-    """
-    Linear interpolation between current and target velocities.
-    
-    Used for smooth transitions when avoidance state changes (e.g., CLEAR to
-    DODGE_LEFT or vice versa). Prevents single-tick velocity discontinuities
-    that can stress the attitude controller.
-    
-    Args:
-        current: Current (north, east) velocity in m/s
-        target: Target (north, east) velocity in m/s
-        t: Blend factor in [0, 1]. 0 = fully current, 1 = fully target
-        
-    Returns:
-        Blended (north, east) velocity
-    """
-    return tuple(c + (g - c) * t for c, g in zip(current, target))
-
-
-def altitude_correction(drone_state: Dict[str, Any]) -> float:
-    """Small down-velocity correction to hold TARGET_ALT (NED: negative = up)."""
-    err = config.TARGET_ALT - drone_state["alt"]  # positive → drone too low
-    raw = -err * config.ALT_GAIN  # negative → ascend
-    return max(-config.ALT_MAX_VEL, min(config.ALT_MAX_VEL, raw))
-
-
-# ════════════════════════════════════════════════════════════════════════════
-#  CORE NAVIGATION WITH AVOIDANCE
-# ════════════════════════════════════════════════════════════════════════════
-
-async def navigate_with_avoidance(
-    drone: System,
+async def navigate_to(
+    publisher: SetpointPublisher,
     target_lat: float,
     target_lon: float,
-    drone_state: Dict[str, Any],
-    lidar_data: Dict[str, str],
-    fsm: Any = None
-) -> None:
+    drone_state: dict[str, Any],
+    lidar_data: dict[str, Any],
+    *,
+    drone_id: str,
+    reporter: ObstacleReporter | None = None,
+    known_obstacles: list[dict[str, Any]] | None = None,
+    target_alt_m: float = config.TARGET_ALT_M,
+    on_status: Callable[[str], None] | None = None,
+    timeout_s: float = config.LEG_TIMEOUT_S,
+) -> str:
+    """Fly to a target, dodging reactively and detouring when that is not enough.
+
+    Args:
+        publisher: The mission's setpoint publisher. This function mutates its
+            setpoint; it never starts or stops offboard.
+        target_lat, target_lon: Destination.
+        drone_state: Live telemetry dict (lat/lon/alt, last_telemetry_ts).
+        lidar_data: Live avoider dict (action, eff_front_m, last_lidar_ts).
+        reporter: Records newly discovered obstacles. None disables reporting.
+        known_obstacles: Obstacles prefetched at mission start, used when a
+            detour has to be planned mid-leg.
+        target_alt_m: Altitude to hold.
+        on_status: Called with a short human-readable status string.
+        timeout_s: Give up after this long. Without a ceiling, a leg that
+            neither arrives nor fails holds the drone BUSY indefinitely.
+
+    Returns:
+        A NavOutcome string.
     """
-    Fly to (target_lat, target_lon) in OFFBOARD mode using world-frame
-    (NED) velocity setpoints with fixed-rate control loop.
+    waypoints: list[tuple[float, float]] = [(target_lat, target_lon)]
+    detour_attempts = 0
+    dt_s = 1.0 / config.NAV_HZ
+    started_at = time.monotonic()
 
-    Why NED frame?
-    ──────────────
-    Body-frame commands (VelocityBodyYawspeed) are relative to where the
-    drone's NOSE is pointing. When PX4 brakes, the nose pitches up.
-    A 2-D LiDAR mounted flat then stares at the sky, returns ∞, and the
-    avoider incorrectly declares the path clear.
+    previous_action = "CLEAR"
+    escalation_handled_for: float | None = None
+    warned_stale = False
 
-    NED commands are always in the WORLD frame. A pitching nose has zero
-    effect on a north/east/down velocity command – PX4's attitude controller
-    works out the required tilt internally. This completely eliminates
-    pitch-blindness.
+    def status(text: str) -> None:
+        drone_state["status"] = text
+        if on_status is not None:
+            on_status(text)
 
-    Control law
-    ───────────
-    • Proportional speed (slow down smoothly near target).
-    • When avoider says DODGE_*: replace the forward NED component with a
-      perpendicular one – no mode switch, no braking impulse.
-    • Altitude held via a small P-controller on the down axis.
-    • Fixed-rate 10 Hz loop (eliminates drift).
-    
-    FSM Integration
-    ───────────────
-    • Fires 'arrived' event when within ARRIVAL_M of target
-    • Fires 'battery_low' event if battery check fails (future implementation)
-    """
-    logger.info(f"Navigating to ({target_lat:.6f}, {target_lon:.6f})")
-    drone_state["status"] = "Navigating"
+    logger.info(
+        "[%s] navigating to (%.6f, %.6f) at %.0f m",
+        drone_id, target_lat, target_lon, target_alt_m,
+    )
 
-    # Prime offboard with a zero setpoint, then start it
-    zero = VelocityNedYaw(0.0, 0.0, 0.0, 0.0)
-    await drone.offboard.set_velocity_ned(zero)
-    try:
-        await drone.offboard.start()
-    except OffboardError as e:
-        logger.warning(f"Offboard start error (may already be running): {e}")
+    while waypoints:
+        leg_lat, leg_lon = waypoints[0]
 
-    # Blending state
-    current_ned_vel = (0.0, 0.0)  # Track current NED velocity for blending
-    blend_duration_s = 0.4  # Blend over 400ms
-    blend_ticks = int(blend_duration_s * config.NAV_HZ)
-    blend_counter = 0
-    last_action = "CLEAR"
+        while True:
+            now = time.monotonic()
 
-    # Navigation tick function
-    async def nav_tick() -> bool:
-        """Single navigation control tick. Returns False to stop loop."""
-        
-        # R5 BUG 2 FIX: Check lidar staleness (fail-closed behavior)
-        LIDAR_STALE_TIMEOUT_S = 1.0  # avoider_node publishes far faster than this in normal operation
-        
-        last_lidar_ts = lidar_data.get("last_lidar_ts", 0)
-        lidar_is_stale = (time.time() - last_lidar_ts) > LIDAR_STALE_TIMEOUT_S
-        
-        if lidar_is_stale:
-            # FAIL CLOSED: do not assume CLEAR if we have never heard from the avoider,
-            # or haven't heard from it recently. Hold position and raise the alarm.
-            drone_state["status"] = "⛔ OBSTACLE FEED DEAD — holding position"
-            if not hasattr(nav_tick, "_warned_stale"):
+            if now - started_at > timeout_s:
                 logger.error(
-                    "[NAV] No lidar/avoider data received — is avoider_node.py and the "
-                    "ros_gz_bridge running? Holding position instead of flying blind. "
-                    "See HOW_TO_RUN.md Terminal 4 and 5."
+                    "[%s] leg timed out after %.0fs without arriving", drone_id, timeout_s
                 )
-                nav_tick._warned_stale = True
-            
-            # Hold position: zero velocity
-            bearing = get_bearing(
-                drone_state["lat"], drone_state["lon"],
-                target_lat, target_lon
+                publisher.hold()
+                return NavOutcome.TIMEOUT
+
+            # ── FAIL CLOSED on a dead obstacle feed ──────────────────────────
+            # Hold position; never infer "clear" from silence. This guard was
+            # already the intent, but nothing wrote last_lidar_ts, so it was
+            # permanently engaged and the drone hovered forever. See
+            # drone_agent/udp_receiver.py.
+            if udp_receiver.is_stale(lidar_data, udp_receiver.LIDAR_TS_KEY, now=now):
+                age = udp_receiver.age_s(lidar_data, udp_receiver.LIDAR_TS_KEY, now=now)
+                if not warned_stale:
+                    warned_stale = True
+                    logger.error(
+                        "[%s] obstacle feed silent for %.1fs - holding position "
+                        "instead of flying blind. Check avoider_node.py and "
+                        "ros_gz_bridge for this drone (see RUN_GUIDE.md).",
+                        drone_id, age,
+                    )
+                status("OBSTACLE FEED DEAD - holding")
+                bearing = geo.get_bearing(
+                    drone_state["lat"], drone_state["lon"], leg_lat, leg_lon
+                )
+                publisher.command_ned(
+                    0.0, 0.0, altitude_correction(drone_state["alt"], target_alt_m),
+                    bearing,
+                )
+                await asyncio.sleep(dt_s)
+                continue
+
+            if warned_stale:
+                warned_stale = False
+                logger.info("[%s] obstacle feed recovered, resuming", drone_id)
+
+            # ── arrival ──────────────────────────────────────────────────────
+            distance_m = geo.get_distance_m(
+                drone_state["lat"], drone_state["lon"], leg_lat, leg_lon
             )
-            await drone.offboard.set_velocity_ned(
-                VelocityNedYaw(0.0, 0.0, 0.0, bearing)
-            )
-            return True  # keep looping, keep holding, do not advance toward target
-        
-        # ── arrival check ────────────────────────────────────────────────────
-        dist_m = get_distance_m(
-            drone_state["lat"], drone_state["lon"],
-            target_lat, target_lon
-        )
 
-        if dist_m <= config.ARRIVAL_M:
-            # Hover in place to stabilise before landing
-            await drone.offboard.set_velocity_ned(zero)
-            await asyncio.sleep(0.5)
-            logger.info(f"Arrived at target ({dist_m:.1f} m)")
-            await drone.offboard.stop()
-            
-            # Fire FSM event if FSM is provided
-            if fsm is not None:
-                fsm.fire("arrived")
-            
-            return False  # Stop the loop
-
-        # ── compute bearing & proportional cruise speed ─────────────────────
-        bearing = get_bearing(
-            drone_state["lat"], drone_state["lon"],
-            target_lat, target_lon
-        )
-        speed = min(
-            config.CRUISE_SPEED,
-            max(config.MIN_SPEED, config.CRUISE_SPEED * (dist_m / config.SLOW_RADIUS_M))
-        )
-
-        # ── pick NED velocity based on lidar state ───────────────────────────
-        nonlocal current_ned_vel, blend_counter, last_action
-        
-        action = lidar_data["action"]
-        
-        # Detect state transition
-        if action != last_action:
-            blend_counter = blend_ticks  # Start blending
-            last_action = action
-
-        # Report obstacle on first dodge lock
-        if action != last_action and action in ["DODGE_LEFT", "DODGE_RIGHT"]:
-            # New dodge - report obstacle
-            try:
-                from drone_agent.obstacle_client import report_obstacle
-                import asyncio
-                asyncio.create_task(report_obstacle(
-                    lat=drone_state["lat"],
-                    lon=drone_state["lon"],
-                    source_drone=getattr(navigate_with_avoidance, "_drone_id", "drone-0"),
-                    radius_m=3.0,
-                    obstacle_type="static_wall",
-                    confidence=0.5
-                ))
-                logger.info(f"🚨 Obstacle detected - reporting to fleet memory at ({drone_state['lat']:.6f}, {drone_state['lon']:.6f})")
-            except Exception as e:
-                logger.warning(f"Failed to report obstacle: {e}")
-        
-        # Compute target velocity (R2.7: Handle ESCALATE explicitly)
-        if action == "ESCALATE":
-            # ── ESCALATION: Detour planning required ────────────────────────
-            # TODO: Integrate global_planner.detour.plan_detour here
-            # For now, treat as CLEAR and log warning
-            drone_state["status"] = "⚠️  ESCALATION TRIGGERED"
-            logger.warning(
-                "[NAV] ESCALATE action received - detour planning not yet implemented. "
-                "Continuing with current velocity."
-            )
-            target_vel = bearing_to_ned(bearing, speed)
-        elif action != "CLEAR":
-            # ── AVOIDANCE ───────────────────────────────────────────────────
-            drone_state["status"] = f"EVADING ({action})"
-            target_vel = dodge_ned(bearing, action)
-        else:
-            # ── CRUISE toward target ────────────────────────────────────────
-            drone_state["status"] = f"Navigating  dist={dist_m:.0f} m"
-            target_vel = bearing_to_ned(bearing, speed)
-        
-        # Apply blending if transitioning
-        if blend_counter > 0:
-            blend_factor = 1.0 - (blend_counter / blend_ticks)
-            n_vel, e_vel = blend_velocity(current_ned_vel, target_vel, blend_factor)
-            blend_counter -= 1
-        else:
-            n_vel, e_vel = target_vel
-        
-        # Update current velocity state
-        current_ned_vel = (n_vel, e_vel)
-        
-        # Add altitude correction
-        d_vel = altitude_correction(drone_state)
-        
-        # Send velocity command
-        await drone.offboard.set_velocity_ned(
-            VelocityNedYaw(n_vel, e_vel, d_vel, bearing)
-        )
-
-        return True  # Continue the loop
-    
-    # Run fixed-rate control loop
-    await fixed_rate_loop(config.NAV_HZ, nav_tick)
-
-
-async def arm_and_takeoff(drone: System, drone_state: Dict[str, Any], fsm: Any = None) -> None:
-    """
-    Arm, command auto-takeoff to TARGET_ALT, then wait until the drone
-    actually reaches that altitude before returning.
-    
-    R4.3 FIX: Added timeout to altitude wait to prevent indefinite hangs.
-    R5 SECONDARY FIX 1: Wait for EKF/heading convergence before arming.
-    
-    FSM Integration
-    ───────────────
-    • Fires 'altitude_reached' event when takeoff altitude is reached
-    • Fires 'fail_x2' event if takeoff fails after retries (future implementation)
-    
-    Raises:
-        TimeoutError: If altitude not reached within TAKEOFF_TIMEOUT_S
-    """
-    drone_state["status"] = "Waiting for EKF convergence"
-    logger.info("Waiting for EKF/heading/GPS convergence before arming...")
-    
-    # R5 SECONDARY FIX 1: Wait for all health checks before arming
-    EKF_TIMEOUT_S = 30.0
-    start_time = time.time()
-    while True:
-        elapsed = time.time() - start_time
-        if elapsed > EKF_TIMEOUT_S:
-            raise TimeoutError(
-                f"EKF/heading/GPS did not converge after {EKF_TIMEOUT_S}s. "
-                f"Check PX4 console for 'Preflight Fail' messages and ensure simulation is running properly."
-            )
-        
-        async for health in drone.telemetry.health():
-            if (health.is_global_position_ok and 
-                health.is_home_position_ok and
-                health.is_armable):
-                logger.info("EKF converged, GPS OK, heading valid - ready to arm")
-                drone_state["status"] = "Arming"
-                break
-            else:
-                logger.debug(
-                    f"Waiting for health: gps={health.is_global_position_ok}, "
-                    f"home={health.is_home_position_ok}, armable={health.is_armable}"
+            if distance_m <= config.ARRIVAL_M:
+                waypoints.pop(0)
+                if waypoints:
+                    logger.info(
+                        "[%s] detour waypoint reached, %d remaining",
+                        drone_id, len(waypoints),
+                    )
+                    break
+                # Settle before handing over to the landing controller, so it
+                # starts from a stable hover rather than mid-deceleration.
+                publisher.hold(
+                    geo.get_bearing(
+                        drone_state["lat"], drone_state["lon"], leg_lat, leg_lon
+                    )
+                )
+                publisher.setpoint.down_m_s = altitude_correction(
+                    drone_state["alt"], target_alt_m
                 )
                 await asyncio.sleep(0.5)
-        else:
-            continue  # Inner loop didn't break, continue outer loop
-        break  # Inner loop broke, exit outer loop
-    
-    logger.info("Arming...")
-    await drone.action.set_takeoff_altitude(config.TARGET_ALT)
-    await drone.action.arm()
-    await asyncio.sleep(1.0)
+                logger.info("[%s] arrived (%.1f m from target)", drone_id, distance_m)
+                status("arrived")
+                return NavOutcome.ARRIVED
 
-    logger.info(f"Taking off to {config.TARGET_ALT} m...")
-    await drone.action.takeoff()
-
-    # Wait for altitude with timeout (R4.3)
-    start_time = time.time()
-    while True:
-        elapsed = time.time() - start_time
-        
-        # Check timeout
-        if elapsed > config.TAKEOFF_TIMEOUT_S:
-            raise TimeoutError(
-                f"Takeoff altitude not reached after {config.TAKEOFF_TIMEOUT_S}s. "
-                f"Current altitude: {drone_state['alt']:.1f} m, target: {config.TARGET_ALT} m. "
-                f"Check: (1) Takeoff command accepted (no preflight failures in PX4 console), "
-                f"(2) EKF2 status is healthy, (3) No simulated physics issues in Gazebo."
+            bearing = geo.get_bearing(
+                drone_state["lat"], drone_state["lon"], leg_lat, leg_lon
             )
-        
-        alt = drone_state["alt"]
-        if alt >= config.TARGET_ALT - 1.5:
-            break
-        logger.info(f"Altitude: {alt:.1f} m  (target {config.TARGET_ALT} m)")
-        await asyncio.sleep(0.5)
+            down_m_s = altitude_correction(drone_state["alt"], target_alt_m)
+            action = str(lidar_data.get("action", "CLEAR"))
+            eff_front_m = float(lidar_data.get("eff_front_m", config.INF_REPLACE_M))
 
-    # Brief stabilisation pause
-    await asyncio.sleep(2.0)
-    logger.info("Altitude reached. Ready for offboard control.")
-    
-    # Fire FSM event if FSM is provided
-    if fsm is not None:
-        fsm.fire("altitude_reached")
+            # ── report a newly discovered obstacle ───────────────────────────
+            # `previous_action` is read BEFORE being reassigned. The old code
+            # assigned first and then compared, so this branch was dead.
+            entering_dodge = (
+                action in ("DODGE_LEFT", "DODGE_RIGHT")
+                and previous_action not in ("DODGE_LEFT", "DODGE_RIGHT")
+            )
+            if entering_dodge and reporter is not None:
+                reporter.report(
+                    drone_state["lat"], drone_state["lon"], bearing, eff_front_m
+                )
+
+            # ── ESCALATE: reactive avoidance has failed, plan around it ──────
+            if action == "ESCALATE":
+                dodge_start = float(lidar_data.get("dodge_age_s", 0.0))
+                # The avoider re-sends ESCALATE every scan (level-triggered, so
+                # a dropped datagram cannot lose it), so latch per dodge episode
+                # rather than replanning ten times a second.
+                episode = now - dodge_start
+                already = (
+                    escalation_handled_for is not None
+                    and abs(episode - escalation_handled_for) < 5.0
+                )
+                if not already:
+                    escalation_handled_for = episode
+                    detour_attempts += 1
+
+                    if detour_attempts > config.DETOUR_MAX_ATTEMPTS_PER_LEG:
+                        logger.error(
+                            "[%s] %d detours attempted on this leg and still "
+                            "blocked - holding for the operator rather than "
+                            "generating ever longer paths.",
+                            drone_id, detour_attempts - 1,
+                        )
+                        publisher.hold(bearing)
+                        status("BLOCKED - detours exhausted")
+                        return NavOutcome.ESCALATION_EXHAUSTED
+
+                    new_waypoints = _plan_detour_from_here(
+                        drone_state, bearing, eff_front_m,
+                        (leg_lat, leg_lon), known_obstacles or [], drone_id,
+                    )
+                    if new_waypoints:
+                        waypoints = new_waypoints + waypoints[1:]
+                        status(f"detouring ({detour_attempts})")
+                        break        # restart the inner loop on the new waypoint
+
+                    logger.warning(
+                        "[%s] no detour found; continuing to dodge reactively",
+                        drone_id,
+                    )
+
+                # While escalated but unable to plan, keep dodging rather than
+                # flying at the obstacle -- which is what the old TODO did.
+                target_north, target_east = dodge_velocity(
+                    bearing, previous_action if previous_action.startswith("DODGE") else "DODGE_LEFT"
+                )
+                status("ESCALATED - dodging")
+
+            elif action in ("DODGE_LEFT", "DODGE_RIGHT"):
+                target_north, target_east = dodge_velocity(bearing, action)
+                status(f"evading ({action})")
+
+            else:
+                speed = cruise_speed_for_distance(distance_m)
+                target_north, target_east = geo.bearing_to_ned(bearing, speed)
+                status(f"cruising, {distance_m:.0f} m to go")
+
+            # ── acceleration-limited command ─────────────────────────────────
+            publisher.command_slewed_ned(
+                target_north, target_east, down_m_s, bearing, dt_s
+            )
+
+            previous_action = action
+            await asyncio.sleep(dt_s)
+
+    return NavOutcome.ARRIVED
+
+
+def _plan_detour_from_here(
+    drone_state: dict[str, Any],
+    bearing_deg: float,
+    eff_front_m: float,
+    goal: tuple[float, float],
+    known_obstacles: list[dict[str, Any]],
+    drone_id: str,
+) -> list[tuple[float, float]]:
+    """Plan around the obstacle the drone is currently stuck on.
+
+    Feeds the planner both the obstacles fetched from fleet memory at mission
+    start AND the one live in front of us right now -- the latter matters
+    because an obstacle nobody has ever reported is exactly the one that caused
+    this escalation, and it would otherwise be invisible to the planner.
+    """
+    from global_planner.detour import plan_detour
+
+    start = (drone_state["lat"], drone_state["lon"])
+
+    live_lat, live_lon = geo.offset_bearing(
+        start[0], start[1], bearing_deg, max(eff_front_m, 1.0)
+    )
+    obstacles = [
+        *known_obstacles,
+        {
+            "lat": live_lat,
+            "lon": live_lon,
+            "radius_m": config.OBSTACLE_DEFAULT_RADIUS_M,
+            "obstacle_type": "live_escalation",
+        },
+    ]
+
+    path = plan_detour(
+        start, goal, obstacles,
+        margin_m=config.DETOUR_MARGIN_M,
+        max_iterations=config.DETOUR_MAX_ITERATIONS,
+    )
+
+    # plan_detour returns [start, goal] when it finds nothing to route around;
+    # that is not a detour and following it would fly straight back at the wall.
+    if len(path) <= 2:
+        return []
+
+    waypoints = path[1:]                     # drop `start`, we are already there
+    logger.info(
+        "[%s] detour planned: %d waypoint(s) around an obstacle %.1f m ahead",
+        drone_id, len(waypoints), eff_front_m,
+    )
+    return waypoints
+
+
+async def descend_to(
+    publisher: SetpointPublisher,
+    drone_state: dict[str, Any],
+    target_alt_m: float,
+    *,
+    drone_id: str,
+    tolerance_m: float = 0.5,
+    timeout_s: float = 60.0,
+) -> bool:
+    """Hold position and change altitude. Used to reach the acquisition altitude.
+
+    Descending to config.SEARCH_ALT_M before searching is half of the fix for
+    finding F3: a 2 m pad spans 55 px at cruise altitude and 92 px at 6 m, and a
+    4x4 ArUco tag needs roughly 25-30 px to decode reliably. The other half is
+    the pad size itself.
+    """
+    dt_s = 1.0 / config.NAV_HZ
+    started_at = time.monotonic()
+    yaw_deg = publisher.setpoint.yaw_deg
+
+    logger.info(
+        "[%s] changing altitude %.1f -> %.1f m",
+        drone_id, drone_state.get("alt", 0.0), target_alt_m,
+    )
+
+    while True:
+        if time.monotonic() - started_at > timeout_s:
+            logger.error(
+                "[%s] altitude change to %.1f m timed out at %.1f m",
+                drone_id, target_alt_m, drone_state.get("alt", 0.0),
+            )
+            publisher.hold(yaw_deg)
+            return False
+
+        error_m = target_alt_m - drone_state["alt"]
+        if abs(error_m) <= tolerance_m:
+            publisher.hold(yaw_deg)
+            logger.info("[%s] at %.1f m", drone_id, drone_state["alt"])
+            return True
+
+        # Faster than the gentle in-cruise altitude hold: this is a deliberate
+        # altitude change, not a correction.
+        down_m_s = geo.clamp(-error_m * 0.6, -1.5, 1.5)
+        publisher.command_ned(0.0, 0.0, down_m_s, yaw_deg)
+        await asyncio.sleep(dt_s)

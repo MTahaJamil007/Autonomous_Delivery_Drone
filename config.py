@@ -46,6 +46,23 @@ PORT_STRIDE = 10
 """Spacing between per-drone UDP ports, so drone-1 uses 5015/5016, not 5006."""
 
 
+MAVSDK_GRPC_PORT_BASE = 50051
+"""gRPC port for each drone's embedded mavsdk_server.
+
+MAVSDK-Python starts its own mavsdk_server per System object when no external
+address is given, and each needs its own port. Three drones in one dispatcher
+process therefore use 50051, 50052, 50053.
+"""
+
+MAVSDK_SYSID_BASE = 245
+"""MAVLink system id for each drone's MAVSDK client.
+
+MAVSDK defaults every client to 245. Three clients sharing one id on the same
+MAVLink network means PX4 cannot tell them apart, and command acknowledgements
+get attributed to the wrong drone.
+"""
+
+
 def drone_index(drone_id: str) -> int:
     """Extract the numeric index from a drone id ('drone-2' -> 2).
 
@@ -69,9 +86,34 @@ def mavsdk_port(drone_id: str) -> int:
     return MAVSDK_PORT_BASE + drone_index(drone_id)
 
 
+MAVSDK_URL_SCHEME = "udp"
+"""URL scheme for the MAVLink connection.
+
+MEASURED, NOT ASSUMED. MAVSDK 2.12.10 on this host rejects `udpin://` outright:
+
+    Warn  Unknown protocol (cli_arg.cpp:71)
+    Error Connection failed: Invalid connection URL
+    Failed to start, exiting...
+
+The previous code tried three spellings in a loop, one of which was
+`udpin://0.0.0.0:14540`, and appeared to succeed because its
+connection_state() loop broke unconditionally on the first iteration whether or
+not a heartbeat had arrived. So it reported a connection it had never made.
+
+`udpin://` is the MAVSDK 3.x name for this scheme. pyproject.toml pins
+mavsdk>=2.0,<3, where the correct name is `udp://`. If that pin is ever raised,
+this is one of the two things that must change (the other is
+Battery.remaining_percent's scale).
+"""
+
+
 def mavsdk_url(drone_id: str) -> str:
-    """MAVSDK connection URL for a drone."""
-    return f"udpin://0.0.0.0:{mavsdk_port(drone_id)}"
+    """MAVSDK connection URL for a drone.
+
+    Binds locally and waits for PX4 to connect to us, which is what PX4's
+    px4-rc.mavlink does: it sends to 14540+instance.
+    """
+    return f"{MAVSDK_URL_SCHEME}://0.0.0.0:{mavsdk_port(drone_id)}"
 
 
 def vision_port(drone_id: str) -> int:
@@ -297,6 +339,16 @@ def search_ring_step_m(altitude_m: float) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 MAVSDK_CONNECT_TIMEOUT_S = 30
+MAVSDK_PROBE_TIMEOUT_S = 4.0
+"""How long a dispatch waits for a MAVLink heartbeat before giving up.
+
+Short on purpose. PX4 emits heartbeats at 1 Hz from the moment its MAVLink
+module starts, so if the autopilot is up at all, four seconds is many times
+over. Waiting the full MAVSDK_CONNECT_TIMEOUT_S would hold the drone BUSY for
+half a minute per doomed dispatch and make a fleet feel wedged even though the
+bookkeeping is correct. Confirming that PX4 is actually up before dispatching is
+scripts/preflight.py's job, not the mission's.
+"""
 GPS_FIX_TIMEOUT_S = 60
 TAKEOFF_TIMEOUT_S = 30
 EKF_CONVERGE_TIMEOUT_S = 30

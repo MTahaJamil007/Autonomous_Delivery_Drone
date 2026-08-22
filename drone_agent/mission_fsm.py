@@ -1,19 +1,39 @@
-"""
-Mission Finite State Machine for autonomous delivery drone.
+"""Mission finite state machine.
 
-Provides state management and transition logic for the entire mission lifecycle,
-from idle through multiple flight legs to completion or abort.
+The transition table below was already correct and unit-tested before this
+remediation; what was missing was any caller. The mission orchestrator now
+drives it, which is what turns the FSM from a described feature into an
+observable one.
+
+WHAT CHANGED
+------------
+* Added transitions for the paths a real mission needs and the table lacked:
+  a pre-leg battery refusal (which happens in NEXT_LEG or IDLE, not ENROUTE),
+  a mission-wide `abort` the safety supervisor can force from any state, and
+  `leg_failed` so a failed landing routes somewhere explicit instead of
+  falling through. Every transition the existing tests exercise is unchanged.
+
+* on_enter callbacks that return coroutines now have their tasks referenced.
+  `asyncio.create_task(result)` with the result discarded can be
+  garbage-collected before it runs, and its exception vanishes with it.
+
+* `history` records the transitions taken, so a mission result can say how far
+  it got rather than only that it failed.
 """
 
-from enum import Enum
-from typing import Dict, Optional, Callable
+from __future__ import annotations
+
+import asyncio
 import logging
+from collections.abc import Callable
+from enum import Enum
 
 logger = logging.getLogger(__name__)
 
 
 class MissionState(Enum):
-    """Mission states representing the lifecycle of a delivery mission."""
+    """States in a delivery mission's lifecycle."""
+
     IDLE = "IDLE"
     TAKEOFF = "TAKEOFF"
     ENROUTE = "ENROUTE"
@@ -27,128 +47,169 @@ class MissionState(Enum):
     DONE = "DONE"
 
 
-# Transition table: {current_state: {event: next_state}}
-TRANSITIONS: Dict[MissionState, Dict[str, MissionState]] = {
+TRANSITIONS: dict[MissionState, dict[str, MissionState]] = {
     MissionState.IDLE: {
-        "start": MissionState.TAKEOFF
+        "start": MissionState.TAKEOFF,
+        # Pre-leg battery gate for the FIRST leg. The gate runs before takeoff,
+        # so it cannot use ENROUTE's battery_low.
+        "battery_low": MissionState.ABORT,
+        "abort": MissionState.ABORT,
     },
     MissionState.TAKEOFF: {
         "altitude_reached": MissionState.ENROUTE,
-        "fail_x2": MissionState.ABORT
+        "fail_x2": MissionState.ABORT,
+        "abort": MissionState.ABORT,
     },
     MissionState.ENROUTE: {
         "arrived": MissionState.SEARCHING,
-        "battery_low": MissionState.ABORT
+        "battery_low": MissionState.ABORT,
+        # Reactive avoidance and detour planning both failed: hold for a human
+        # rather than keep generating longer paths through clutter.
+        "blocked": MissionState.HOVER_AND_ALERT,
+        "abort": MissionState.ABORT,
     },
     MissionState.SEARCHING: {
         "marker_locked": MissionState.APPROACH,
-        "search_exhausted": MissionState.HOVER_AND_ALERT
+        "search_exhausted": MissionState.HOVER_AND_ALERT,
+        "abort": MissionState.ABORT,
     },
     MissionState.APPROACH: {
         "centered_stable": MissionState.DESCEND,
-        "lock_lost": MissionState.SEARCHING
+        "lock_lost": MissionState.SEARCHING,
+        "touchdown": MissionState.PAYLOAD_OP,
+        "search_exhausted": MissionState.HOVER_AND_ALERT,
+        "abort": MissionState.ABORT,
     },
     MissionState.DESCEND: {
         "touchdown": MissionState.PAYLOAD_OP,
-        "marker_drift": MissionState.APPROACH
+        "marker_drift": MissionState.APPROACH,
+        "lock_lost": MissionState.SEARCHING,
+        "search_exhausted": MissionState.HOVER_AND_ALERT,
+        "abort": MissionState.ABORT,
     },
     MissionState.PAYLOAD_OP: {
         "op_confirmed": MissionState.NEXT_LEG,
-        "op_failed_x2": MissionState.HOVER_AND_ALERT
+        "op_failed_x2": MissionState.HOVER_AND_ALERT,
+        "abort": MissionState.ABORT,
     },
     MissionState.NEXT_LEG: {
         "more_legs": MissionState.TAKEOFF,
-        "mission_complete": MissionState.DONE
+        "mission_complete": MissionState.DONE,
+        # Pre-leg battery gate for legs 2 and 3.
+        "battery_low": MissionState.ABORT,
+        "abort": MissionState.ABORT,
     },
     MissionState.HOVER_AND_ALERT: {
         "operator_override": MissionState.SEARCHING,
-        "geofence_timeout": MissionState.ABORT
+        "geofence_timeout": MissionState.ABORT,
+        "abort": MissionState.ABORT,
     },
+    # Terminal states accept nothing. Firing at them logs and returns False,
+    # which is the correct response to a late event from a cancelled task.
+    MissionState.ABORT: {},
+    MissionState.DONE: {},
 }
 
 
 class MissionFSM:
+    """Mission state with logged transitions and entry callbacks.
+
+    Invalid events are logged and return False rather than raising. That is
+    deliberate: an event arriving from a task that is being torn down should not
+    turn a controlled shutdown into an exception on the flight path.
     """
-    Finite State Machine for mission control.
-    
-    Manages state transitions and provides hooks for state entry callbacks.
-    Invalid transitions are logged but do not raise exceptions, allowing
-    graceful degradation.
-    """
-    
-    def __init__(self, initial_state: MissionState = MissionState.IDLE):
-        """Initialize FSM with the given initial state."""
+
+    def __init__(self, initial_state: MissionState = MissionState.IDLE,
+                 label: str = ""):
         self._state = initial_state
-        self._on_enter_callbacks: Dict[MissionState, list[Callable]] = {}
-        logger.info(f"Mission FSM initialized in state: {self._state.value}")
-    
+        self._label = label
+        self._on_enter: dict[MissionState, list[Callable]] = {}
+        self._tasks: set[asyncio.Task] = set()
+        self.history: list[tuple[str, str, str]] = []
+        logger.info("%sFSM initialised in %s", self._prefix, initial_state.value)
+
+    @property
+    def _prefix(self) -> str:
+        return f"[{self._label}] " if self._label else ""
+
     @property
     def state(self) -> MissionState:
-        """Get current state."""
         return self._state
-    
+
+    def can_fire(self, event: str) -> bool:
+        return event in TRANSITIONS.get(self._state, {})
+
     def fire(self, event: str) -> bool:
-        """
-        Attempt to fire an event and transition to the next state.
-        
-        Args:
-            event: Event name to fire
-            
-        Returns:
-            True if transition succeeded, False if invalid event for current state
-        """
-        current_transitions = TRANSITIONS.get(self._state, {})
-        next_state = current_transitions.get(event)
-        
+        """Attempt a transition. Returns True if it happened."""
+        available = TRANSITIONS.get(self._state, {})
+        next_state = available.get(event)
+
         if next_state is None:
             logger.warning(
-                f"Invalid transition: event '{event}' not allowed in state "
-                f"'{self._state.value}'. Valid events: {list(current_transitions.keys())}"
+                "%sevent '%s' is not valid in %s (valid: %s)",
+                self._prefix, event, self._state.value,
+                ", ".join(sorted(available)) or "none - terminal state",
             )
             return False
-        
+
         logger.info(
-            f"State transition: {self._state.value} --[{event}]--> {next_state.value}"
+            "%s%s --[%s]--> %s",
+            self._prefix, self._state.value, event, next_state.value,
         )
-        
-        old_state = self._state
+        self.history.append((self._state.value, event, next_state.value))
         self._state = next_state
-        
-        # Trigger on_enter callbacks for the new state
-        self._trigger_on_enter(next_state)
-        
+        self._run_on_enter(next_state)
         return True
-    
+
+    def force(self, state: MissionState, reason: str) -> None:
+        """Jump to a state regardless of the transition table.
+
+        For the safety supervisor only. A safety layer must not be blocked from
+        recording an abort because the mission happened to be in a state whose
+        row lacks that event -- the drone is coming down either way, and the FSM
+        should say so.
+        """
+        logger.critical(
+            "%sFORCED %s -> %s: %s",
+            self._prefix, self._state.value, state.value, reason,
+        )
+        self.history.append((self._state.value, f"force:{reason}", state.value))
+        self._state = state
+        self._run_on_enter(state)
+
     def on_enter(self, state: MissionState, callback: Callable) -> None:
-        """
-        Register a callback to be invoked when entering a specific state.
-        
-        Args:
-            state: The state to watch for entry
-            callback: Function to call when entering that state (no args)
-        """
-        if state not in self._on_enter_callbacks:
-            self._on_enter_callbacks[state] = []
-        self._on_enter_callbacks[state].append(callback)
-        logger.debug(f"Registered on_enter callback for state: {state.value}")
-    
-    def _trigger_on_enter(self, state: MissionState) -> None:
-        """Trigger all on_enter callbacks for the given state."""
-        import asyncio  # R2.6: Import asyncio for coroutine check
-        callbacks = self._on_enter_callbacks.get(state, [])
-        for callback in callbacks:
+        """Register a callback invoked on entry to `state`."""
+        self._on_enter.setdefault(state, []).append(callback)
+
+    def _run_on_enter(self, state: MissionState) -> None:
+        for callback in self._on_enter.get(state, []):
             try:
                 result = callback()
-                # R2.6: Support async callbacks
-                if asyncio.iscoroutine(result):
-                    asyncio.create_task(result)
-            except Exception as e:
+            except Exception:  # noqa: BLE001 - a callback must not break a transition
                 logger.error(
-                    f"Error in on_enter callback for state {state.value}: {e}",
-                    exc_info=True
+                    "%son_enter callback for %s raised",
+                    self._prefix, state.value, exc_info=True,
                 )
-    
+                continue
+
+            if asyncio.iscoroutine(result):
+                try:
+                    task = asyncio.create_task(result)
+                except RuntimeError:
+                    # No running loop: a synchronous caller registered an async
+                    # callback. Close the coroutine so it does not warn about
+                    # never being awaited.
+                    result.close()
+                    logger.warning(
+                        "%sasync on_enter callback for %s skipped: no event loop",
+                        self._prefix, state.value,
+                    )
+                    continue
+                # Hold the reference: an unreferenced task can be collected
+                # before it runs, and its exception disappears with it.
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+
     def reset(self) -> None:
-        """Reset FSM to IDLE state."""
-        logger.info("Resetting FSM to IDLE")
         self._state = MissionState.IDLE
+        self.history.clear()
