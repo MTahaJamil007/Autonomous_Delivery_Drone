@@ -109,26 +109,27 @@ class ArucoDetectorWrapper:
             return []
 
         detections = []
-        for marker_corners, marker_id in zip(corners, ids.flatten()):
-            points = marker_corners[0]              # 4x2 float32
+        # strict=True: OpenCV returns one corner set per id, so a mismatch is a
+        # broken detector result, not something to iterate past.
+        for marker_corners, marker_id in zip(corners, ids.flatten(), strict=True):
+            points = marker_corners[0]  # 4x2 float32
             marker_x = float(points[:, 0].mean())
             marker_y = float(points[:, 1].mean())
 
             # Mean side length: a robust apparent-size estimate that lets the
             # consumer sanity-check against config.MARKER_MIN_DECODE_PX.
-            sides = [
-                float(np.linalg.norm(points[i] - points[(i + 1) % 4]))
-                for i in range(4)
-            ]
+            sides = [float(np.linalg.norm(points[i] - points[(i + 1) % 4])) for i in range(4)]
 
-            detections.append({
-                "id": int(marker_id),
-                "err_x": round(marker_x - centre_x, 2),
-                "err_y": round(marker_y - centre_y, 2),
-                "area_px": round(float(cv2.contourArea(points)), 1),
-                "size_px": round(sum(sides) / 4.0, 2),
-                "corners": [[round(float(x), 2), round(float(y), 2)] for x, y in points],
-            })
+            detections.append(
+                {
+                    "id": int(marker_id),
+                    "err_x": round(marker_x - centre_x, 2),
+                    "err_y": round(marker_y - centre_y, 2),
+                    "area_px": round(float(cv2.contourArea(points)), 1),
+                    "size_px": round(sum(sides) / 4.0, 2),
+                    "corners": [[round(float(x), 2), round(float(y), 2)] for x, y in points],
+                }
+            )
 
         return detections
 
@@ -136,8 +137,9 @@ class ArucoDetectorWrapper:
 class VisionBridge:
     """Subscribes to one drone's camera and broadcasts its detections."""
 
-    def __init__(self, drone_id: str, topic: str, udp_host: str, udp_port: int,
-                 preview: bool = False):
+    def __init__(
+        self, drone_id: str, topic: str, udp_host: str, udp_port: int, preview: bool = False
+    ):
         self._drone_id = drone_id
         self._topic = topic
         self._addr = (udp_host, udp_port)
@@ -161,16 +163,17 @@ class VisionBridge:
         now = time.monotonic()
 
         try:
-            frame = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                (msg.height, msg.width, 3)
-            )
+            frame = np.frombuffer(msg.data, dtype=np.uint8).reshape((msg.height, msg.width, 3))
         except ValueError as exc:
             # A reshape failure means the pixel format is not RGB8; detecting on
             # a misinterpreted buffer would produce confident nonsense.
             logger.error(
                 "cannot interpret %dx%d frame as RGB8 (%s). Check the camera's "
                 "<format> in sim/models/%s/model.sdf.",
-                msg.width, msg.height, exc, config.GZ_MODEL_BASE,
+                msg.width,
+                msg.height,
+                exc,
+                config.GZ_MODEL_BASE,
             )
             return
 
@@ -202,12 +205,9 @@ class VisionBridge:
         ids = tuple(sorted(d["id"] for d in detections))
         if ids != self._last_ids:
             if ids:
-                sizes = ", ".join(
-                    f"id{d['id']}={d['size_px']:.0f}px" for d in detections
-                )
+                sizes = ", ".join(f"id{d['id']}={d['size_px']:.0f}px" for d in detections)
                 too_small = [
-                    d["id"] for d in detections
-                    if d["size_px"] < config.MARKER_MIN_DECODE_PX
+                    d["id"] for d in detections if d["size_px"] < config.MARKER_MIN_DECODE_PX
                 ]
                 note = f" (marginal size: {too_small})" if too_small else ""
                 logger.info("markers %s%s", sizes, note)
@@ -223,8 +223,12 @@ class VisionBridge:
         fx = (width / 2.0) / math.tan(config.CAMERA_HFOV_RAD / 2.0)
         logger.info(
             "first frame: %dx%d, fx=%.1f px, %.1f m pad spans %.0f px at %.0f m",
-            width, height, fx, config.PAD_SIZE_M,
-            fx * config.PAD_SIZE_M / config.SEARCH_ALT_M, config.SEARCH_ALT_M,
+            width,
+            height,
+            fx,
+            config.PAD_SIZE_M,
+            fx * config.PAD_SIZE_M / config.SEARCH_ALT_M,
+            config.SEARCH_ALT_M,
         )
         if width != config.CAMERA_WIDTH_PX or height != config.CAMERA_HEIGHT_PX:
             logger.error(
@@ -233,8 +237,12 @@ class VisionBridge:
                 "convert pixels to metres, so it is now wrong by a factor of "
                 "%.2f. Fix config.py or the model, then re-run "
                 "scripts/preflight.py.",
-                width, height, config.CAMERA_WIDTH_PX, config.CAMERA_HEIGHT_PX,
-                config.CAMERA_FX_PX, fx / config.CAMERA_FX_PX,
+                width,
+                height,
+                config.CAMERA_WIDTH_PX,
+                config.CAMERA_HEIGHT_PX,
+                config.CAMERA_FX_PX,
+                fx / config.CAMERA_FX_PX,
             )
 
     def _show(self, image: np.ndarray, detections: list[dict]) -> None:
@@ -246,10 +254,13 @@ class VisionBridge:
             cx = int(width / 2 + det["err_x"])
             cy = int(height / 2 + det["err_y"])
             cv2.circle(image, (cx, cy), 5, (0, 255, 0), -1)
-            cv2.putText(image, f"id{det['id']}", (cx + 8, cy),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+            cv2.putText(
+                image, f"id{det['id']}", (cx + 8, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1
+            )
+        # blocking-ok: opt-in debug preview only, never on the flight path.
+        # Reached solely when --preview is passed; on_image() documents why.
         cv2.imshow(f"{self._drone_id} downward camera", image)
-        cv2.waitKey(1)
+        cv2.waitKey(1)  # blocking-ok: paired with imshow above
 
     def close(self) -> None:
         self._sock.close()
@@ -261,21 +272,27 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="ArUco detection bridge for one drone.")
     parser.add_argument("--drone-id", default="drone-0")
     parser.add_argument(
-        "--topic", default=None,
-        help="Gazebo image topic. Default: derived from --drone-id via "
-             "sim_topics.camera_topic().",
+        "--topic",
+        default=None,
+        help="Gazebo image topic. Default: derived from --drone-id via sim_topics.camera_topic().",
     )
     parser.add_argument("--udp-host", default="127.0.0.1")
     parser.add_argument(
-        "--udp-port", type=int, default=None,
+        "--udp-port",
+        type=int,
+        default=None,
         help="Default: config.vision_port(drone_id).",
     )
     parser.add_argument(
-        "--preview", action="store_true",
+        "--preview",
+        action="store_true",
         help="Show an OpenCV debug window. Costs frames -- do not use in flight.",
     )
-    parser.add_argument("--headless", action="store_true",
-                        help="Explicitly disable the preview (default behaviour).")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Explicitly disable the preview (default behaviour).",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -293,10 +310,7 @@ def main(argv: list[str] | None = None) -> int:
     import sim_topics
 
     topic = args.topic or sim_topics.camera_topic(args.drone_id)
-    udp_port = (
-        args.udp_port if args.udp_port is not None
-        else config.vision_port(args.drone_id)
-    )
+    udp_port = args.udp_port if args.udp_port is not None else config.vision_port(args.drone_id)
     preview = args.preview and not args.headless
 
     # Imported here, not at module scope, so this file can be imported (and
@@ -319,14 +333,19 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info(
         "vision bridge up: %s | topic=%s | udp=%s:%d | dict=%s | preview=%s",
-        args.drone_id, topic, args.udp_host, udp_port,
-        bridge._detector.dictionary_name, preview,
+        args.drone_id,
+        topic,
+        args.udp_host,
+        udp_port,
+        bridge._detector.dictionary_name,
+        preview,
     )
 
     try:
         while True:
-            # The Gazebo subscriber runs on its own thread; this loop only keeps
-            # the process alive, so it sleeps rather than spinning.
+            # blocking-ok: this is a synchronous CLI entry point, not an async
+            # context. The Gazebo subscriber runs on its own thread; this loop
+            # only keeps the process alive, so it sleeps rather than spinning.
             time.sleep(0.2)
     except KeyboardInterrupt:
         pass

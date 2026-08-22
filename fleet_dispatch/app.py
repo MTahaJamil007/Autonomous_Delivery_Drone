@@ -32,21 +32,22 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from pathlib import Path
 from pydantic import BaseModel, Field
 
 import config
 from drone_agent.contracts import DeliveryJob, JobStatus, MissionResult
-from fleet_dispatch import db as fleet_db
 
 # MODULE SCOPE, NO try/except. If these cannot be imported, this process must
 # not start: a dispatcher that cannot fly is worse than no dispatcher, because
 # it accepts jobs and reports them as assigned.
 from drone_web.drone_logic import execute_delivery, get_state_snapshot
+from fleet_dispatch import db as fleet_db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,16 +55,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("fleet_dispatch")
 
-app = FastAPI(
-    title="Fleet Dispatch Center",
-    description="Multi-drone delivery coordination and monitoring",
-    version="3.0.0",
-)
-
-# Absolute path: the previous Jinja2Templates(directory="templates") resolved
-# relative to the process's cwd, so the server only rendered when launched from
-# inside fleet_dispatch/.
-templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 HEARTBEAT_INTERVAL_S = 2.0
 WEBSOCKET_INTERVAL_S = 0.5
@@ -82,7 +73,7 @@ class DispatchRequest(BaseModel):
 
 
 class DispatchResponse(BaseModel):
-    status: str                      # Success | Queued | Error
+    status: str  # Success | Queued | Error
     message: str
     job_id: str | None = None
     drone_id: str | None = None
@@ -92,28 +83,35 @@ class DispatchResponse(BaseModel):
 #  Lifecycle
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.on_event("startup")
-async def startup_event() -> None:
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Startup and shutdown, as one span.
+
+    A lifespan handler rather than the deprecated on_event pair, and the two
+    halves belong together anyway: startup recovers jobs a previous run
+    orphaned, and shutdown is what stops this run orphaning any.
+    """
     await fleet_db.init_database()
     recovered = await fleet_db.recover_orphaned_jobs()
     if recovered:
         logger.warning(
-            "released %d job(s) left in flight by a previous run; their drones "
-            "are AVAILABLE again", recovered,
+            "released %d job(s) left in flight by a previous run; their drones are AVAILABLE again",
+            recovered,
         )
     logger.info(
-        "dispatch ready: fleet=%d, port=%d", config.FLEET_SIZE, config.FLEET_DISPATCH_PORT
+        "dispatch ready: fleet=%d, port=%d",
+        config.FLEET_SIZE,
+        config.FLEET_DISPATCH_PORT,
     )
 
+    yield
 
-@app.on_event("shutdown")
-async def shutdown_event() -> None:
-    """Abort live missions rather than orphaning them.
-
-    A cancelled mission still passes through run_mission's finally: block, so
-    the job is recorded ABORTED and the drone is freed. Without this the next
-    startup would have to recover them.
-    """
+    # Abort live missions rather than orphaning them. A cancelled mission still
+    # passes through run_mission's finally: block, so the job is recorded
+    # ABORTED and the drone is freed - without this the next startup would have
+    # to recover them, and an operator would see a fleet that shrank over a
+    # restart.
     for job_id, task in list(_missions.items()):
         logger.warning("shutdown: cancelling mission for job %s", job_id)
         task.cancel()
@@ -122,9 +120,23 @@ async def shutdown_event() -> None:
             await task
 
 
+app = FastAPI(
+    title="Fleet Dispatch Center",
+    description="Multi-drone delivery coordination and monitoring",
+    version="3.0.0",
+    lifespan=lifespan,
+)
+
+# Absolute path: the previous Jinja2Templates(directory="templates") resolved
+# relative to the process's cwd, so the server only rendered when launched from
+# inside fleet_dispatch/.
+templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Mission execution
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 async def _heartbeat_writer(drone_id: str) -> None:
     """Mirror a flying drone's telemetry into the database for the UI.
@@ -163,16 +175,16 @@ async def run_mission(job: DeliveryJob, drone_id: str) -> None:
     result: MissionResult
 
     try:
-        heartbeat = asyncio.create_task(
-            _heartbeat_writer(drone_id), name=f"heartbeat-{drone_id}"
-        )
+        heartbeat = asyncio.create_task(_heartbeat_writer(drone_id), name=f"heartbeat-{drone_id}")
         await fleet_db.mark_job_in_progress(job.job_id)
 
         logger.info("job %s: mission starting on %s", job.job_id, drone_id)
         result = await execute_delivery(job, drone_id)
         logger.info(
             "job %s: mission returned %s (%s)",
-            job.job_id, result.status.value, result.detail,
+            job.job_id,
+            result.status.value,
+            result.detail,
         )
 
     except asyncio.CancelledError:
@@ -219,7 +231,7 @@ async def _drain_queue() -> None:
 
         drone_id = await fleet_db.claim_drone_for_job(job.job_id)
         if drone_id is None:
-            return          # fleet is fully committed; try again on next finalize
+            return  # fleet is fully committed; try again on next finalize
 
         logger.info("queue drain: job %s -> %s", job.job_id, drone_id)
         _missions[job.job_id] = asyncio.create_task(
@@ -230,6 +242,7 @@ async def _drain_queue() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 #  HTTP
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
@@ -249,8 +262,10 @@ async def dispatch(request: DispatchRequest) -> DispatchResponse:
     """
     try:
         job = await fleet_db.create_job(
-            request.pickup_lat, request.pickup_lon,
-            request.drop_lat, request.drop_lon,
+            request.pickup_lat,
+            request.pickup_lon,
+            request.drop_lat,
+            request.drop_lon,
         )
 
         drone_id = await fleet_db.claim_drone_for_job(job.job_id)
@@ -314,6 +329,7 @@ async def abort_job(job_id: str) -> dict:
 #  WebSockets
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @app.websocket("/ws/{drone_id}")
 async def websocket_drone_telemetry(websocket: WebSocket, drone_id: str) -> None:
     """Per-drone telemetry channel: /ws/drone-0, /ws/drone-1, ...
@@ -327,11 +343,13 @@ async def websocket_drone_telemetry(websocket: WebSocket, drone_id: str) -> None
         while True:
             status = await fleet_db.get_drone_status(drone_id)
             if status is None:
-                await websocket.send_json({
-                    "drone_id": drone_id,
-                    "status": "OFFLINE",
-                    "detail": "not in registry",
-                })
+                await websocket.send_json(
+                    {
+                        "drone_id": drone_id,
+                        "status": "OFFLINE",
+                        "detail": "not in registry",
+                    }
+                )
             else:
                 status["mission_live"] = status.get("current_job_id") in _missions
                 await websocket.send_json(status)
@@ -354,11 +372,13 @@ async def websocket_fleet(websocket: WebSocket) -> None:
             for drone in drones:
                 drone["mission_live"] = drone.get("current_job_id") in _missions
             recent = await fleet_db.get_all_jobs(limit=10)
-            await websocket.send_json({
-                "drones": drones,
-                "recent_jobs": recent,
-                "queued": sum(1 for j in recent if j["status"] == JobStatus.QUEUED.value),
-            })
+            await websocket.send_json(
+                {
+                    "drones": drones,
+                    "recent_jobs": recent,
+                    "queued": sum(1 for j in recent if j["status"] == JobStatus.QUEUED.value),
+                }
+            )
             await asyncio.sleep(WEBSOCKET_INTERVAL_S)
     except WebSocketDisconnect:
         logger.debug("fleet websocket closed")

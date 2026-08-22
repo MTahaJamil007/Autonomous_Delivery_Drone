@@ -1,0 +1,68 @@
+name: check
+
+# Runs the same gates as `make check` locally. Deliberately does NOT install
+# ROS 2, Gazebo or PX4: the whole point of the bench suite is that it proves the
+# contracts without a simulator, and a CI job that needs a GPU and a 40-minute
+# PX4 build is a CI job that gets disabled.
+#
+# The sitl-marked tests are excluded here by pytest.ini and are covered by the
+# flight procedures in docs/ACCEPTANCE.md instead.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip "setuptools>=68,<80"
+          # opencv-contrib-python-headless: the CI runner has no display, and
+          # the full package pulls GUI libraries that fail to import without one.
+          python -m pip install opencv-contrib-python-headless
+          python -m pip install -e ".[dev]" --no-build-isolation
+          python -m pip install httpx
+
+      - name: Lint
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+
+      - name: Import check from a neutral working directory
+        # THE EXACT CHECK THAT WOULD HAVE CAUGHT THE ORIGINAL DISPATCH BLOCKER.
+        # fleet_dispatch/app.py imported a symbol that did not exist; because the
+        # import sat inside a function, nothing failed until a dispatch arrived,
+        # and then it wedged a drone instead of crashing.
+        run: |
+          cd /tmp
+          python -c "
+          from drone_web.drone_logic import execute_delivery, get_state_snapshot
+          import drone_agent.mission, fleet_dispatch.app, perception.vision_bridge
+          import obstacle_memory_service.app, global_planner.detour, avoider_node
+          print('every module imports from /tmp')"
+
+      - name: Repository gates
+        # Each of these encodes a regression this codebase actually had, so a
+        # failure names the specific mistake rather than 'the build broke'.
+        run: python scripts/repo_checks.py
+
+      - name: Tests
+        run: ./scripts/test.sh -q
+
+      - name: ArUco pad assets must decode
+        # Finding F1: the pad the old code spawned decodes in ZERO of OpenCV's
+        # 27 predefined dictionaries, which is why precision landing never
+        # worked. A pad asset regression must fail here, not in the air.
+        run: python scripts/preflight.py --skip topics --skip geometry --skip mavsdk --skip obstacles

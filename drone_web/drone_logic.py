@@ -66,8 +66,12 @@ async def execute_delivery(job: DeliveryJob, drone_id: str) -> MissionResult:
     """
     logger.info(
         "dispatch accepted: job %s on %s, pickup (%.6f, %.6f) -> drop (%.6f, %.6f)",
-        job.job_id, drone_id,
-        job.pickup_lat, job.pickup_lon, job.drop_lat, job.drop_lon,
+        job.job_id,
+        drone_id,
+        job.pickup_lat,
+        job.pickup_lon,
+        job.drop_lat,
+        job.drop_lon,
     )
     return await mission_core.DroneMission(drone_id).run(job)
 

@@ -54,13 +54,16 @@ def check_battery_sufficient(current_pct: float, required_pct: float) -> bool:
         logger.warning(
             "battery gate FAILED: %.1f%% available, %.1f%% needed "
             "(%.1f%% for the leg + %d%% margin)",
-            current_pct, required_with_margin, required_pct,
+            current_pct,
+            required_with_margin,
+            required_pct,
             config.BATTERY_RESERVE_MARGIN_PCT,
         )
     else:
         logger.info(
             "battery gate passed: %.1f%% available, %.1f%% needed",
-            current_pct, required_with_margin,
+            current_pct,
+            required_with_margin,
         )
     return sufficient
 
@@ -92,13 +95,16 @@ def check_leg_battery(
     if battery_pct is None or battery_pct <= 0.0:
         logger.warning(
             "battery gate: no telemetry yet (%r) - allowing the leg. The safety "
-            "supervisor's critical-battery check remains active.", battery_pct,
+            "supervisor's critical-battery check remains active.",
+            battery_pct,
         )
         return True, ""
 
     required_pct = estimate_leg_energy_pct(
-        drone_state.get("lat", 0.0), drone_state.get("lon", 0.0),
-        target_lat, target_lon,
+        drone_state.get("lat", 0.0),
+        drone_state.get("lon", 0.0),
+        target_lat,
+        target_lon,
     )
 
     if check_battery_sufficient(battery_pct, required_pct):

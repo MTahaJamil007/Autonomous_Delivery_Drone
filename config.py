@@ -73,7 +73,7 @@ def drone_index(drone_id: str) -> int:
     if not drone_id.startswith(prefix):
         raise ValueError(f"Invalid drone_id {drone_id!r} (expected 'drone-N')")
     try:
-        index = int(drone_id[len(prefix):])
+        index = int(drone_id[len(prefix) :])
     except ValueError as exc:
         raise ValueError(f"Invalid drone_id {drone_id!r} (expected 'drone-N')") from exc
     if index < 0:
@@ -135,11 +135,11 @@ def lidar_port(drone_id: str) -> int:
 # unit-less names by deliberate exception to the convention above. Their units
 # are metres and seconds as annotated.
 
-SAFE_DIST = 6.5                 # m  - closer than this in front triggers a dodge
-CLEAR_DIST = 9.0                # m  - front must exceed this to start the clear timer
-CLEAR_CONFIRM_S = 2.5           # s  - how long the front must stay clear to unlock
-MIN_LOCK_S = 2.0                # s  - minimum dodge duration before testing for clear
-ESCALATION_LOCK_S = 12.0        # s  - dodging this long means reactive avoidance lost
+SAFE_DIST = 6.5  # m  - closer than this in front triggers a dodge
+CLEAR_DIST = 9.0  # m  - front must exceed this to start the clear timer
+CLEAR_CONFIRM_S = 2.5  # s  - how long the front must stay clear to unlock
+MIN_LOCK_S = 2.0  # s  - minimum dodge duration before testing for clear
+ESCALATION_LOCK_S = 12.0  # s  - dodging this long means reactive avoidance lost
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  LiDAR geometry and sector definition
@@ -169,8 +169,8 @@ INF_REPLACE_M = 15.0
 """Substituted for inf/nan returns. Must exceed CLEAR_DIST or an empty world
 would never read as clear."""
 
-FRONT_HALF_DEG = 35            # +/- this defines the 70-degree front cone
-SIDE_START_DEG = 40            # side sectors span [SIDE_START_DEG, SIDE_END_DEG]
+FRONT_HALF_DEG = 35  # +/- this defines the 70-degree front cone
+SIDE_START_DEG = 40  # side sectors span [SIDE_START_DEG, SIDE_END_DEG]
 SIDE_END_DEG = 100
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -233,16 +233,16 @@ fragile, together they give roughly 4x headroom (finding F3).
 #  Navigation
 # ─────────────────────────────────────────────────────────────────────────────
 
-TARGET_ALT_M = 10.0             # cruise / takeoff altitude
-CRUISE_SPEED_M_S = 3.5          # maximum forward speed
-SLOW_RADIUS_M = 12.0            # start decelerating within this range of the target
-MIN_SPEED_M_S = 0.8             # never stall completely on approach
-ARRIVAL_M = 2.0                 # arrival tolerance
-DODGE_SPEED_M_S = 2.5           # sideways dodge speed
-BACK_SPEED_M_S = 0.4            # small rearward component while dodging
-ALT_GAIN = 0.25                 # altitude-hold P gain (1/s)
-ALT_MAX_VEL_M_S = 0.5           # clamp on vertical correction
-NAV_HZ = 10                     # navigation decision rate
+TARGET_ALT_M = 10.0  # cruise / takeoff altitude
+CRUISE_SPEED_M_S = 3.5  # maximum forward speed
+SLOW_RADIUS_M = 12.0  # start decelerating within this range of the target
+MIN_SPEED_M_S = 0.8  # never stall completely on approach
+ARRIVAL_M = 2.0  # arrival tolerance
+DODGE_SPEED_M_S = 2.5  # sideways dodge speed
+BACK_SPEED_M_S = 0.4  # small rearward component while dodging
+ALT_GAIN = 0.25  # altitude-hold P gain (1/s)
+ALT_MAX_VEL_M_S = 0.5  # clamp on vertical correction
+NAV_HZ = 10  # navigation decision rate
 
 MAX_ACCEL_M_S2 = 2.0
 """Per-axis slew limit on commanded horizontal velocity.
@@ -277,8 +277,8 @@ LANDING_K_P = 0.8
 Altitude-invariant by construction, unlike the pixel gain it replaces.
 """
 
-LANDING_MAX_VEL_M_S = 1.5       # clamp on horizontal landing velocity
-LANDING_DEADBAND_M = 0.05       # ignore offsets smaller than this
+LANDING_MAX_VEL_M_S = 1.5  # clamp on horizontal landing velocity
+LANDING_DEADBAND_M = 0.05  # ignore offsets smaller than this
 LANDING_EMA_ALPHA = 0.3
 """Smoothing applied to the measured metric offset.
 
@@ -287,8 +287,8 @@ implementation did) adds lag to the actuator without removing noise from the
 sensor.
 """
 
-CENTER_THRESH_PX = 20           # legacy pixel centring threshold, kept for tests
-CENTERED_M = 0.25               # ground offset below which the pad counts as centred
+CENTER_THRESH_PX = 20  # legacy pixel centring threshold, kept for tests
+CENTERED_M = 0.25  # ground offset below which the pad counts as centred
 
 DESCENT_CONE_SLOPE = 0.35
 DESCENT_CONE_INTERCEPT_M = 0.15
@@ -298,12 +298,12 @@ A cone that narrows with altitude. Descending at a fixed rate regardless of
 centring converts a tolerable lateral error at 8 m into a missed pad at 0 m.
 """
 
-DESCENT_VZ_HIGH_M_S = 0.8       # above DESCENT_SLOW_ALT_M
-DESCENT_VZ_MID_M_S = 0.35       # below DESCENT_SLOW_ALT_M
-DESCENT_VZ_FINAL_M_S = 0.15     # below DESCENT_FINAL_ALT_M
+DESCENT_VZ_HIGH_M_S = 0.8  # above DESCENT_SLOW_ALT_M
+DESCENT_VZ_MID_M_S = 0.35  # below DESCENT_SLOW_ALT_M
+DESCENT_VZ_FINAL_M_S = 0.15  # below DESCENT_FINAL_ALT_M
 DESCENT_SLOW_ALT_M = 1.5
 DESCENT_FINAL_ALT_M = 0.6
-CLIMB_RECENTER_VZ_M_S = 0.3     # climb rate while re-centring outside the cone
+CLIMB_RECENTER_VZ_M_S = 0.3  # climb rate while re-centring outside the cone
 
 TOUCHDOWN_ALT_M = 0.30
 """Fallback touchdown threshold. LandedState.ON_GROUND plus disarm is the
@@ -375,7 +375,7 @@ BATTERY_LANDING_RESERVE_PCT = 5.0
 #  Payload
 # ─────────────────────────────────────────────────────────────────────────────
 
-BAY_OFFSET_NED_M = (0.0, 0.0, 0.35)   # 0.35 m below the airframe centre
+BAY_OFFSET_NED_M = (0.0, 0.0, 0.35)  # 0.35 m below the airframe centre
 CARGO_MODEL_PREFIX = "cargo"
 CARGO_SDF_URI = "model://cargo_box"
 PAYLOAD_HZ = 10
@@ -443,7 +443,7 @@ derived from that name; see sim_topics.py."""
 # ─────────────────────────────────────────────────────────────────────────────
 
 PX4_PARAMS = {
-    "MPC_ACC_HOR": MAX_ACCEL_M_S2,   # keep the autopilot's limit and ours equal
+    "MPC_ACC_HOR": MAX_ACCEL_M_S2,  # keep the autopilot's limit and ours equal
     "MPC_ACC_HOR_MAX": 5.0,
     "MPC_JERK_MAX": 8.0,
     "MPC_XY_VEL_MAX": 4.0,

@@ -8,10 +8,9 @@ conversion the landing loop depends on, and the leg wiring that used to hardcode
 marker 0 three times.
 """
 
-from pathlib import Path
-
 import asyncio
 import math
+from pathlib import Path
 
 import pytest
 
@@ -23,10 +22,10 @@ from drone_agent.mission import DroneMission, get_state_snapshot
 from drone_agent.mission_fsm import MissionFSM, MissionState
 from drone_agent.setpoint import Setpoint, SetpointPublisher
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 #  P3.1 per-drone state
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_two_missions_keep_independent_state():
     """P3 acceptance: two DroneMission instances in one process, no sim.
@@ -117,6 +116,7 @@ def test_invalid_drone_id_is_rejected_at_construction():
 #  P3.2 setpoint publisher
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class FakeOffboard:
     def __init__(self):
         self.sent: list[tuple] = []
@@ -124,10 +124,14 @@ class FakeOffboard:
         self.stopped = 0
 
     async def set_velocity_ned(self, velocity):
-        self.sent.append((
-            velocity.north_m_s, velocity.east_m_s,
-            velocity.down_m_s, velocity.yaw_deg,
-        ))
+        self.sent.append(
+            (
+                velocity.north_m_s,
+                velocity.east_m_s,
+                velocity.down_m_s,
+                velocity.yaw_deg,
+            )
+        )
 
     async def start(self):
         self.started += 1
@@ -196,8 +200,7 @@ async def test_publisher_keeps_streaming_while_mission_code_blocks():
 
     await publisher.stop()
     assert after - before >= 10, (
-        f"the publisher must keep sending during a slow await, got "
-        f"{after - before} sends in 0.3 s"
+        f"the publisher must keep sending during a slow await, got {after - before} sends in 0.3 s"
     )
 
 
@@ -216,11 +219,11 @@ def test_hold_keeps_streaming_rather_than_stopping():
 @pytest.mark.parametrize(
     "forward,right,heading,expected_north,expected_east",
     [
-        (1.0, 0.0, 0.0, 1.0, 0.0),      # nose north, fly forward -> north
-        (1.0, 0.0, 90.0, 0.0, 1.0),     # nose east,  fly forward -> east
-        (1.0, 0.0, 180.0, -1.0, 0.0),   # nose south
-        (0.0, 1.0, 0.0, 0.0, 1.0),      # nose north, fly right   -> east
-        (0.0, 1.0, 90.0, -1.0, 0.0),    # nose east,  fly right   -> south
+        (1.0, 0.0, 0.0, 1.0, 0.0),  # nose north, fly forward -> north
+        (1.0, 0.0, 90.0, 0.0, 1.0),  # nose east,  fly forward -> east
+        (1.0, 0.0, 180.0, -1.0, 0.0),  # nose south
+        (0.0, 1.0, 0.0, 0.0, 1.0),  # nose north, fly right   -> east
+        (0.0, 1.0, 90.0, -1.0, 0.0),  # nose east,  fly right   -> south
     ],
 )
 def test_body_to_ned_conversion(forward, right, heading, expected_north, expected_east):
@@ -276,6 +279,7 @@ def test_acceleration_limit_matches_the_autopilots():
 #  P3.3 leg wiring
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_each_leg_looks_for_its_own_marker():
     """P3.3: legs come from marker_models, not three hardcoded zeroes.
 
@@ -313,6 +317,7 @@ def test_marker_id_and_role_maps_are_consistent():
 #  P3.3 FSM routing
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_a_failed_landing_routes_somewhere_explicit():
     """The missing `else`.
 
@@ -340,8 +345,10 @@ def test_pre_leg_battery_refusal_can_reach_abort():
     """
     for start_state, path in (
         (MissionState.IDLE, []),
-        (MissionState.NEXT_LEG, ["start", "altitude_reached", "arrived",
-                                 "marker_locked", "touchdown", "op_confirmed"]),
+        (
+            MissionState.NEXT_LEG,
+            ["start", "altitude_reached", "arrived", "marker_locked", "touchdown", "op_confirmed"],
+        ),
     ):
         fsm = MissionFSM()
         for event in path:
@@ -402,6 +409,7 @@ def test_the_full_happy_path_reaches_done():
 #  P3.4 obstacle prefetch
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_prefetch_bbox_covers_all_three_legs_with_margin():
     """A tight box excludes exactly the obstacles a detour would route around."""
     job = DeliveryJob("j1", 30.0320, 72.3145, 30.0350, 72.3180)
@@ -428,6 +436,7 @@ def test_empty_bounding_box_raises_rather_than_matching_nothing():
 # ─────────────────────────────────────────────────────────────────────────────
 #  P3.9 PX4 parameters
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 async def test_px4_params_are_read_back_not_just_written():
     """PX4 silently ignores unknown names and clamps out-of-range values.

@@ -88,7 +88,9 @@ def get_state_snapshot(drone_id: str) -> dict[str, Any]:
     if mission is None:
         return {
             "drone_id": drone_id,
-            "lat": 0.0, "lon": 0.0, "alt": 0.0,
+            "lat": 0.0,
+            "lon": 0.0,
+            "alt": 0.0,
             "battery_pct": None,
             "status": "idle",
             "fsm_state": MissionState.IDLE.value,
@@ -105,11 +107,12 @@ def registered_drones() -> list[str]:
 #  MISSION
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 class DroneMission:
     """One drone, one mission, all of its own state."""
 
     def __init__(self, drone_id: str):
-        config.drone_index(drone_id)          # validates the id shape early
+        config.drone_index(drone_id)  # validates the id shape early
 
         self.drone_id = drone_id
         self.index = config.drone_index(drone_id)
@@ -117,7 +120,9 @@ class DroneMission:
         # ── per-drone state, formerly module globals ────────────────────────
         self.drone_state: dict[str, Any] = {
             "drone_id": drone_id,
-            "lat": 0.0, "lon": 0.0, "alt": 0.0,
+            "lat": 0.0,
+            "lon": 0.0,
+            "alt": 0.0,
             "battery_pct": None,
             "landed_state": None,
             "armed": False,
@@ -208,9 +213,7 @@ class DroneMission:
         # That is exactly the failure mode this phase exists to eliminate, so the
         # gRPC handshake gets its own timeout, separate from the heartbeat wait.
         try:
-            await asyncio.wait_for(
-                drone.connect(system_address=url), timeout=timeout_s + 6.0
-            )
+            await asyncio.wait_for(drone.connect(system_address=url), timeout=timeout_s + 6.0)
         except asyncio.TimeoutError as exc:
             raise ConnectionError(
                 f"mavsdk_server did not become ready for {url}. It usually "
@@ -277,6 +280,7 @@ class DroneMission:
         supervisor's heartbeat check reads, and nothing wrote it before, which is
         why the check fired an emergency RTL on its first tick.
         """
+
         async def position() -> None:
             async for pos in self._drone.telemetry.position():
                 self.drone_state["lat"] = pos.latitude_deg
@@ -315,9 +319,7 @@ class DroneMission:
             if self.drone_state[udp_receiver.TELEMETRY_TS_KEY]:
                 return
             await asyncio.sleep(0.1)
-        logger.warning(
-            "[%s] no telemetry sample within 10s of subscribing", self.drone_id
-        )
+        logger.warning("[%s] no telemetry sample within 10s of subscribing", self.drone_id)
 
     async def start_sensor_receivers(self) -> None:
         """Start the UDP readers for this drone's vision and LiDAR feeds."""
@@ -349,9 +351,7 @@ class DroneMission:
 
         self.home_lat = self.drone_state["lat"]
         self.home_lon = self.drone_state["lon"]
-        logger.info(
-            "[%s] home is (%.7f, %.7f)", self.drone_id, self.home_lat, self.home_lon
-        )
+        logger.info("[%s] home is (%.7f, %.7f)", self.drone_id, self.home_lat, self.home_lon)
 
         # P3.9: apply the tuning that used to be a comment asking the operator to
         # type seven values into a PX4 shell.
@@ -359,15 +359,19 @@ class DroneMission:
         if problems:
             logger.warning(
                 "[%s] flying with unconfirmed tuning: %s",
-                self.drone_id, "; ".join(problems),
+                self.drone_id,
+                "; ".join(problems),
             )
 
         self._publisher = SetpointPublisher(self._drone, self.drone_id)
         self._reporter = navigation.ObstacleReporter(self.drone_id)
 
         self._supervisor = SafetySupervisor(
-            self._drone, self.drone_state, self.drone_id,
-            self.home_lat, self.home_lon,
+            self._drone,
+            self.drone_state,
+            self.drone_id,
+            self.home_lat,
+            self.home_lon,
             lidar_data=self.lidar_data,
         )
         # Autopilot-enforced fence, which survives this process dying.
@@ -399,7 +403,8 @@ class DroneMission:
         self.known_obstacles = await fetch_known_obstacles_for_mission(bbox)
         logger.info(
             "[%s] %d known obstacle(s) prefetched for this mission",
-            self.drone_id, len(self.known_obstacles),
+            self.drone_id,
+            len(self.known_obstacles),
         )
 
     async def _spawn_pads(self, job: DeliveryJob) -> None:
@@ -413,7 +418,8 @@ class DroneMission:
         if not gz_client.gz_available():
             logger.warning(
                 "[%s] `gz` not on PATH: skipping pad spawning. Precision "
-                "landing will find nothing to land on.", self.drone_id,
+                "landing will find nothing to land on.",
+                self.drone_id,
             )
             return
 
@@ -425,14 +431,19 @@ class DroneMission:
 
         for role, (lat, lon) in targets.items():
             ok = await gz_client.spawn_pad_at_gps(
-                role, lat, lon, self.home_lat, self.home_lon,
+                role,
+                lat,
+                lon,
+                self.home_lat,
+                self.home_lon,
                 name_prefix=f"{self.drone_id}_",
             )
             if not ok:
                 logger.error(
-                    "[%s] failed to spawn %s (%s). Landing on marker %d will "
-                    "not be possible.",
-                    self.drone_id, role, marker_models.PAD_MODELS[role],
+                    "[%s] failed to spawn %s (%s). Landing on marker %d will not be possible.",
+                    self.drone_id,
+                    role,
+                    marker_models.PAD_MODELS[role],
                     marker_models.ROLE_TO_ID[role],
                 )
 
@@ -452,15 +463,16 @@ class DroneMission:
 
         async def _wait_armable() -> None:
             async for health in self._drone.telemetry.health():
-                if (health.is_global_position_ok and health.is_home_position_ok
-                        and health.is_armable):
+                if (
+                    health.is_global_position_ok
+                    and health.is_home_position_ok
+                    and health.is_armable
+                ):
                     return
                 await asyncio.sleep(0.5)
 
         try:
-            await asyncio.wait_for(
-                _wait_armable(), timeout=max(1.0, deadline - time.monotonic())
-            )
+            await asyncio.wait_for(_wait_armable(), timeout=max(1.0, deadline - time.monotonic()))
         except asyncio.TimeoutError as exc:
             raise TimeoutError(
                 f"EKF/GPS did not converge within {config.EKF_CONVERGE_TIMEOUT_S}s. "
@@ -488,7 +500,7 @@ class DroneMission:
                 )
             await asyncio.sleep(0.5)
 
-        await asyncio.sleep(2.0)              # let the hover settle
+        await asyncio.sleep(2.0)  # let the hover settle
         logger.info("[%s] at %.1f m", self.drone_id, self.drone_state["alt"])
 
         # Hand over to offboard from a stable hover, once for the whole leg.
@@ -509,7 +521,13 @@ class DroneMission:
 
         logger.info(
             "%s\n[%s] LEG %s -> (%.6f, %.6f), marker %d\n%s",
-            "=" * 62, self.drone_id, role, target_lat, target_lon, marker_id, "=" * 62,
+            "=" * 62,
+            self.drone_id,
+            role,
+            target_lat,
+            target_lon,
+            marker_id,
+            "=" * 62,
         )
 
         # ── pre-leg battery gate ────────────────────────────────────────────
@@ -528,8 +546,11 @@ class DroneMission:
 
         # ── navigate ────────────────────────────────────────────────────────
         nav_result = await navigation.navigate_to(
-            self._publisher, target_lat, target_lon,
-            self.drone_state, self.lidar_data,
+            self._publisher,
+            target_lat,
+            target_lon,
+            self.drone_state,
+            self.lidar_data,
             drone_id=self.drone_id,
             reporter=self._reporter,
             known_obstacles=self.known_obstacles,
@@ -550,10 +571,15 @@ class DroneMission:
 
         # ── land on THIS leg's marker ───────────────────────────────────────
         landing_result = await landing.execute_precision_landing(
-            self._publisher, self._drone, marker_id,
-            target_lat, target_lon,
-            self.vision_data, self.drone_state,
-            drone_id=self.drone_id, fsm=self.fsm,
+            self._publisher,
+            self._drone,
+            marker_id,
+            target_lat,
+            target_lon,
+            self.vision_data,
+            self.drone_state,
+            drone_id=self.drone_id,
+            fsm=self.fsm,
         )
 
         if landing_result != landing.LandingOutcome.TOUCHDOWN:
@@ -578,7 +604,7 @@ class DroneMission:
             return outcome
 
         self.fsm.fire("op_confirmed")
-        await asyncio.sleep(3.0)              # visible dwell on the pad
+        await asyncio.sleep(3.0)  # visible dwell on the pad
         return outcome
 
     # ── entry point ─────────────────────────────────────────────────────────
@@ -610,7 +636,8 @@ class DroneMission:
                     self.fsm.force(MissionState.ABORT, reason)
                     return MissionResult.aborted(
                         f"Safety supervisor intervened: {reason}",
-                        self.legs, self.snapshot(),
+                        self.legs,
+                        self.snapshot(),
                     )
 
                 outcome = await self.fly_leg(role, target)
@@ -621,7 +648,8 @@ class DroneMission:
                     return MissionResult.failed(
                         f"Leg '{role}' (marker {outcome.marker_id}) failed: "
                         f"{outcome.detail or 'no detail'}",
-                        self.legs, self.snapshot(),
+                        self.legs,
+                        self.snapshot(),
                     )
 
                 if index < len(legs) - 1:
@@ -642,9 +670,7 @@ class DroneMission:
             logger.error("[%s] mission raised", self.drone_id, exc_info=True)
             self._status(f"failed: {exc}")
             self.fsm.force(MissionState.ABORT, str(exc))
-            return MissionResult.failed(
-                f"{type(exc).__name__}: {exc}", self.legs, self.snapshot()
-            )
+            return MissionResult.failed(f"{type(exc).__name__}: {exc}", self.legs, self.snapshot())
 
         finally:
             await self.shutdown()
@@ -684,5 +710,7 @@ class DroneMission:
 
         logger.info(
             "[%s] shutdown complete; FSM ended in %s after %d transition(s)",
-            self.drone_id, self.fsm.state.value, len(self.fsm.history),
+            self.drone_id,
+            self.fsm.state.value,
+            len(self.fsm.history),
         )

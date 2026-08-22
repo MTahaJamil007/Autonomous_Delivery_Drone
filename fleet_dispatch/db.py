@@ -76,8 +76,7 @@ async def init_database() -> None:
         now = utc_now_iso()
         for drone_id in config.DRONE_IDS:
             await db.execute(
-                "INSERT OR IGNORE INTO drones (id, status, last_heartbeat) "
-                "VALUES (?, ?, ?)",
+                "INSERT OR IGNORE INTO drones (id, status, last_heartbeat) VALUES (?, ?, ?)",
                 (drone_id, DroneStatus.AVAILABLE.value, now),
             )
         await db.commit()
@@ -88,6 +87,7 @@ async def init_database() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 #  Drones
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 async def update_drone_telemetry(
     drone_id: str,
@@ -111,8 +111,11 @@ async def update_drone_telemetry(
     values: list[Any] = [utc_now_iso()]
 
     for column, value in (
-        ("battery_pct", battery_pct), ("lat", lat),
-        ("lon", lon), ("alt", alt), ("detail", detail),
+        ("battery_pct", battery_pct),
+        ("lat", lat),
+        ("lon", lon),
+        ("alt", alt),
+        ("detail", detail),
     ):
         if value is not None:
             fields.append(f"{column} = ?")
@@ -156,6 +159,7 @@ async def get_all_drones() -> list[dict[str, Any]]:
 #  Jobs
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 async def create_job(
     pickup_lat: float, pickup_lon: float, drop_lat: float, drop_lon: float
 ) -> DeliveryJob:
@@ -171,8 +175,15 @@ async def create_job(
         await db.execute(
             "INSERT INTO jobs (id, pickup_lat, pickup_lon, drop_lat, drop_lon, "
             "status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (job.job_id, job.pickup_lat, job.pickup_lon, job.drop_lat, job.drop_lon,
-             JobStatus.QUEUED.value, utc_now_iso()),
+            (
+                job.job_id,
+                job.pickup_lat,
+                job.pickup_lon,
+                job.drop_lat,
+                job.drop_lon,
+                JobStatus.QUEUED.value,
+                utc_now_iso(),
+            ),
         )
         await db.commit()
 
@@ -211,8 +222,7 @@ async def claim_drone_for_job(job_id: str) -> str | None:
             claim = await db.execute(
                 "UPDATE drones SET status = ?, current_job_id = ?, detail = ? "
                 "WHERE id = ? AND status = ?",
-                (DroneStatus.BUSY.value, job_id, "assigned",
-                 drone_id, DroneStatus.AVAILABLE.value),
+                (DroneStatus.BUSY.value, job_id, "assigned", drone_id, DroneStatus.AVAILABLE.value),
             )
             if claim.rowcount == 0:
                 # Lost the race for this drone; try the next candidate.
@@ -222,16 +232,13 @@ async def claim_drone_for_job(job_id: str) -> str | None:
             assign = await db.execute(
                 "UPDATE jobs SET assigned_drone = ?, status = ?, started_at = ? "
                 "WHERE id = ? AND status = ?",
-                (drone_id, JobStatus.ASSIGNED.value, utc_now_iso(),
-                 job_id, JobStatus.QUEUED.value),
+                (drone_id, JobStatus.ASSIGNED.value, utc_now_iso(), job_id, JobStatus.QUEUED.value),
             )
             if assign.rowcount == 0:
                 # The job was claimed by someone else between our read and now.
                 # Roll the drone back so it does not leak as permanently BUSY.
                 await db.rollback()
-                logger.warning(
-                    "job %s was no longer QUEUED; released drone %s", job_id, drone_id
-                )
+                logger.warning("job %s was no longer QUEUED; released drone %s", job_id, drone_id)
                 return None
 
             await db.commit()
@@ -270,9 +277,7 @@ async def finalize_job(job_id: str, status: JobStatus, detail: str = "") -> str 
     async with _connect() as db:
         await _configure(db)
 
-        cursor = await db.execute(
-            "SELECT assigned_drone FROM jobs WHERE id = ?", (job_id,)
-        )
+        cursor = await db.execute("SELECT assigned_drone FROM jobs WHERE id = ?", (job_id,))
         row = await cursor.fetchone()
         if row is None:
             logger.error("finalize_job: no such job %s", job_id)
@@ -286,8 +291,7 @@ async def finalize_job(job_id: str, status: JobStatus, detail: str = "") -> str 
 
         if drone_id:
             await db.execute(
-                "UPDATE drones SET status = ?, current_job_id = NULL, detail = ? "
-                "WHERE id = ?",
+                "UPDATE drones SET status = ?, current_job_id = NULL, detail = ? WHERE id = ?",
                 (DroneStatus.AVAILABLE.value, detail[:200], drone_id),
             )
 
@@ -295,7 +299,10 @@ async def finalize_job(job_id: str, status: JobStatus, detail: str = "") -> str 
 
     logger.info(
         "job %s -> %s (%s); drone %s released",
-        job_id, status.value, detail or "no detail", drone_id,
+        job_id,
+        status.value,
+        detail or "no detail",
+        drone_id,
     )
     return drone_id
 
@@ -317,8 +324,11 @@ async def next_queued_job() -> DeliveryJob | None:
         if row is None:
             return None
         return DeliveryJob(
-            row["id"], row["pickup_lat"], row["pickup_lon"],
-            row["drop_lat"], row["drop_lon"],
+            row["id"],
+            row["pickup_lat"],
+            row["pickup_lon"],
+            row["drop_lat"],
+            row["drop_lon"],
         )
 
 
@@ -375,8 +385,7 @@ async def recover_orphaned_jobs() -> int:
         # have a live mission behind it, because missions do not survive the
         # process that runs them.
         await db.execute(
-            "UPDATE drones SET status = ?, current_job_id = NULL, detail = ? "
-            "WHERE status = ?",
+            "UPDATE drones SET status = ?, current_job_id = NULL, detail = ? WHERE status = ?",
             (DroneStatus.AVAILABLE.value, "released at startup", DroneStatus.BUSY.value),
         )
         await db.commit()

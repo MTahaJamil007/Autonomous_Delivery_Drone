@@ -61,8 +61,7 @@ def camera_topic(drone_id: str, world: str = config.GZ_WORLD) -> str:
 def lidar_topic(drone_id: str, world: str = config.GZ_WORLD) -> str:
     """Gazebo transport topic carrying the 2D LiDAR's scans."""
     return (
-        f"/world/{world}/model/{model_name(drone_id)}"
-        f"/link/{LIDAR_LINK}/sensor/{LIDAR_SENSOR}/scan"
+        f"/world/{world}/model/{model_name(drone_id)}/link/{LIDAR_LINK}/sensor/{LIDAR_SENSOR}/scan"
     )
 
 
@@ -80,9 +79,14 @@ def ros_gz_bridge_args(drone_id: str, world: str = config.GZ_WORLD) -> list[str]
     """Full argv for the ros_gz_bridge process serving one drone's LiDAR."""
     gz_topic = lidar_topic(drone_id, world)
     return [
-        "ros2", "run", "ros_gz_bridge", "parameter_bridge",
+        "ros2",
+        "run",
+        "ros_gz_bridge",
+        "parameter_bridge",
         f"{gz_topic}@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
-        "--ros-args", "-r", f"{gz_topic}:={ros_scan_topic(drone_id)}",
+        "--ros-args",
+        "-r",
+        f"{gz_topic}:={ros_scan_topic(drone_id)}",
     ]
 
 

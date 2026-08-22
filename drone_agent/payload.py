@@ -91,9 +91,7 @@ class PayloadBay:
         Called before the pickup leg so the box is visibly waiting there, which
         also makes the attach step observable rather than notional.
         """
-        x_east_m, y_north_m = geo.lat_lon_to_local_enu(
-            lat, lon, self._home_lat, self._home_lon
-        )
+        x_east_m, y_north_m = geo.lat_lon_to_local_enu(lat, lon, self._home_lat, self._home_lon)
 
         # Remove any box left by a previous mission: Gazebo refuses a duplicate
         # entity name rather than replacing it, so the second dispatch of a
@@ -101,13 +99,17 @@ class PayloadBay:
         await gz_client.remove_model(self._cargo_model)
 
         self._spawned = await gz_client.spawn_model(
-            config.CARGO_SDF_URI, self._cargo_model,
-            x_east_m, y_north_m, z_up_m=0.1,
+            config.CARGO_SDF_URI,
+            self._cargo_model,
+            x_east_m,
+            y_north_m,
+            z_up_m=0.1,
         )
         if self._spawned:
             logger.info(
                 "[%s] cargo '%s' placed at the pickup point",
-                self._drone_id, self._cargo_model,
+                self._drone_id,
+                self._cargo_model,
             )
         else:
             logger.warning(
@@ -115,7 +117,8 @@ class PayloadBay:
                 "parcel is cosmetic -- but the payload demonstration will show "
                 "nothing. Check that GZ_SIM_RESOURCE_PATH includes "
                 "sim/models (source sim/env.sh).",
-                self._drone_id, self._cargo_model,
+                self._drone_id,
+                self._cargo_model,
             )
         return self._spawned
 
@@ -145,8 +148,10 @@ class PayloadBay:
         offset_north_m, offset_east_m, offset_down_m = config.BAY_OFFSET_NED_M
 
         x_east_m, y_north_m = geo.lat_lon_to_local_enu(
-            drone_state.get("lat", 0.0), drone_state.get("lon", 0.0),
-            self._home_lat, self._home_lon,
+            drone_state.get("lat", 0.0),
+            drone_state.get("lon", 0.0),
+            self._home_lat,
+            self._home_lon,
         )
 
         # NED offsets into the ENU world frame. Down is positive in NED and z is
@@ -181,14 +186,17 @@ class PayloadBay:
                     if self._pose_failures <= 3 or self._pose_failures % 100 == 0:
                         logger.warning(
                             "[%s] cargo pose update failed (#%d): %s",
-                            self._drone_id, self._pose_failures, exc,
+                            self._drone_id,
+                            self._pose_failures,
+                            exc,
                         )
                 await asyncio.sleep(period_s)
 
         self._task = asyncio.create_task(loop(), name=f"cargo-{self._drone_id}")
         logger.info(
             "[%s] cargo following at %d Hz (async, off the control loop)",
-            self._drone_id, config.PAYLOAD_HZ,
+            self._drone_id,
+            config.PAYLOAD_HZ,
         )
 
     async def stop_following(self) -> None:
@@ -202,7 +210,8 @@ class PayloadBay:
         self._task = None
         logger.info(
             "[%s] cargo following stopped (%d pose failures)",
-            self._drone_id, self._pose_failures,
+            self._drone_id,
+            self._pose_failures,
         )
 
     async def cleanup(self) -> None:

@@ -138,8 +138,7 @@ class SetpointPublisher:
         try:
             await self._drone.offboard.start()
             self._offboard_active = True
-            logger.info("[%s] OFFBOARD engaged, streaming at %.0f Hz",
-                        self._drone_id, self._hz)
+            logger.info("[%s] OFFBOARD engaged, streaming at %.0f Hz", self._drone_id, self._hz)
         except OffboardError as exc:
             # Report and keep publishing: PX4 sometimes reports a failure for a
             # mode it did in fact enter, and a stream with no consumer is
@@ -148,12 +147,11 @@ class SetpointPublisher:
                 "[%s] offboard.start() rejected: %s. Continuing to stream; if "
                 "the drone does not respond, check the PX4 console for a "
                 "rejected-mode message.",
-                self._drone_id, exc._result.result_str,
+                self._drone_id,
+                exc._result.result_str,
             )
 
-        self._task = asyncio.create_task(
-            self._run(), name=f"setpoint-{self._drone_id}"
-        )
+        self._task = asyncio.create_task(self._run(), name=f"setpoint-{self._drone_id}")
 
     async def stop(self) -> None:
         """Stop publishing and leave OFFBOARD. Call once, at mission end.
@@ -179,7 +177,10 @@ class SetpointPublisher:
         logger.info(
             "[%s] setpoint publisher stopped: %d publishes, %d send failures, "
             "worst gap %.3fs (PX4 tolerates ~0.5s)",
-            self._drone_id, self._publishes, self._send_failures, self._max_gap_s,
+            self._drone_id,
+            self._publishes,
+            self._send_failures,
+            self._max_gap_s,
         )
 
     # ── the loop ─────────────────────────────────────────────────────────────
@@ -208,15 +209,18 @@ class SetpointPublisher:
                         logger.error(
                             "[%s] setpoint gap %.3fs - approaching the OFFBOARD "
                             "timeout. Something is blocking the event loop.",
-                            self._drone_id, gap,
+                            self._drone_id,
+                            gap,
                         )
 
                 setpoint = self.setpoint
                 try:
                     await self._drone.offboard.set_velocity_ned(
                         VelocityNedYaw(
-                            setpoint.north_m_s, setpoint.east_m_s,
-                            setpoint.down_m_s, setpoint.yaw_deg,
+                            setpoint.north_m_s,
+                            setpoint.east_m_s,
+                            setpoint.down_m_s,
+                            setpoint.yaw_deg,
                         )
                     )
                     self._publishes += 1
@@ -228,7 +232,9 @@ class SetpointPublisher:
                     if self._send_failures <= 3 or self._send_failures % 100 == 0:
                         logger.warning(
                             "[%s] setpoint send failed (#%d): %s",
-                            self._drone_id, self._send_failures, exc,
+                            self._drone_id,
+                            self._send_failures,
+                            exc,
                         )
 
                 next_tick += self._period_s

@@ -64,7 +64,7 @@ obstacle_memory_service = ["schema.sql"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["vision_env", "sim"]
+extend-exclude = ["vision_env", "sim", "tests/test_avoider_node.py"]
 
 [tool.ruff.lint]
 select = [
@@ -83,3 +83,11 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Tests print for human-readable output and are allowed loose imports.
 "tests/*" = ["E402", "F401"]
+
+# HANDS OFF. The P2 acceptance criterion is that this test passes UNMODIFIED:
+# it was written months before the API it tests existed, so it is the one
+# artefact in the repository that proves decide_action() was built to match a
+# pre-existing contract rather than the contract being retrofitted to the
+# implementation. Excluded from lint and format so that no automated pass -
+# not even a whitespace fix - can weaken that claim.
+"tests/test_avoider_node.py" = ["ALL"]

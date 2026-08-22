@@ -33,6 +33,8 @@ Usage:
 Exit status is 0 only if every selected check passed.
 """
 
+# ruff: noqa: E402 - the sys.path bootstrap below must run before the
+# project imports, so that this script works before `pip install -e .`.
 from __future__ import annotations
 
 import argparse
@@ -93,6 +95,7 @@ class Report:
 #  Gazebo helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _gz_available() -> bool:
     return shutil.which("gz") is not None
 
@@ -102,7 +105,10 @@ def _gz_topic_list() -> list[str]:
     try:
         out = subprocess.run(
             ["gz", "topic", "-l"],
-            capture_output=True, text=True, timeout=GZ_TIMEOUT_S, check=False,
+            capture_output=True,
+            text=True,
+            timeout=GZ_TIMEOUT_S,
+            check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
         return []
@@ -118,7 +124,10 @@ def _gz_echo_one(topic: str, timeout_s: float = GZ_TIMEOUT_S) -> str:
     try:
         out = subprocess.run(
             ["gz", "topic", "-e", "-t", topic, "-n", "1"],
-            capture_output=True, text=True, timeout=timeout_s, check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
         )
         return out.stdout
     except subprocess.TimeoutExpired as exc:
@@ -144,6 +153,7 @@ def _scalar(text: str, field_name: str) -> float | None:
 #  Checks
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def check_topics_advertised(report: Report, drone_ids: list[str]) -> dict[str, dict[str, str]]:
     """Verify the model-scoped topics exist. Returns the ones found, per drone."""
     if not _gz_available():
@@ -154,7 +164,8 @@ def check_topics_advertised(report: Report, drone_ids: list[str]) -> dict[str, d
     advertised = set(_gz_topic_list())
     if not advertised:
         report.add(
-            "gazebo reachable", FAIL,
+            "gazebo reachable",
+            FAIL,
             "`gz topic -l` returned nothing. Is the Gazebo server running? "
             "Start it with world/spawn_fleet.sh (see RUN_GUIDE.md).",
         )
@@ -187,7 +198,8 @@ def check_camera_geometry(report: Report, drone_id: str, topic: str) -> None:
     text = _gz_echo_one(topic)
     if not text:
         report.add(
-            f"{drone_id}: camera geometry", FAIL,
+            f"{drone_id}: camera geometry",
+            FAIL,
             f"{topic} is advertised but published no message within "
             f"{GZ_TIMEOUT_S:.0f}s. The sensor exists but is not producing frames.",
         )
@@ -196,13 +208,15 @@ def check_camera_geometry(report: Report, drone_id: str, topic: str) -> None:
     width = _scalar(text, "width")
     height = _scalar(text, "height")
     if width is None or height is None:
-        report.add(f"{drone_id}: camera geometry", FAIL,
-                   f"could not parse width/height from {topic}")
+        report.add(
+            f"{drone_id}: camera geometry", FAIL, f"could not parse width/height from {topic}"
+        )
         return
 
     if int(width) != config.CAMERA_WIDTH_PX or int(height) != config.CAMERA_HEIGHT_PX:
         report.add(
-            f"{drone_id}: camera geometry", FAIL,
+            f"{drone_id}: camera geometry",
+            FAIL,
             f"live {int(width)}x{int(height)} != config "
             f"{config.CAMERA_WIDTH_PX}x{config.CAMERA_HEIGHT_PX}. "
             f"CAMERA_FX_PX ({config.CAMERA_FX_PX:.1f}) is derived from the "
@@ -211,11 +225,14 @@ def check_camera_geometry(report: Report, drone_id: str, topic: str) -> None:
         )
         return
 
-    report.add(f"{drone_id}: camera geometry", PASS,
-               f"{int(width)}x{int(height)}, fx={config.CAMERA_FX_PX:.1f} px, "
-               f"{config.PAD_SIZE_M} m pad spans "
-               f"{config.marker_px_at_altitude(config.SEARCH_ALT_M):.0f} px at "
-               f"SEARCH_ALT_M={config.SEARCH_ALT_M} m")
+    report.add(
+        f"{drone_id}: camera geometry",
+        PASS,
+        f"{int(width)}x{int(height)}, fx={config.CAMERA_FX_PX:.1f} px, "
+        f"{config.PAD_SIZE_M} m pad spans "
+        f"{config.marker_px_at_altitude(config.SEARCH_ALT_M):.0f} px at "
+        f"SEARCH_ALT_M={config.SEARCH_ALT_M} m",
+    )
 
 
 def check_lidar_geometry(report: Report, drone_id: str, topic: str) -> None:
@@ -223,7 +240,8 @@ def check_lidar_geometry(report: Report, drone_id: str, topic: str) -> None:
     text = _gz_echo_one(topic)
     if not text:
         report.add(
-            f"{drone_id}: lidar geometry", FAIL,
+            f"{drone_id}: lidar geometry",
+            FAIL,
             f"{topic} is advertised but published no message within "
             f"{GZ_TIMEOUT_S:.0f}s. The sensor exists but is not producing scans.",
         )
@@ -238,38 +256,39 @@ def check_lidar_geometry(report: Report, drone_id: str, topic: str) -> None:
     if angle_min is None:
         problems.append("angle_min missing")
     elif not math.isclose(angle_min, config.LIDAR_ANGLE_MIN_RAD, abs_tol=1e-3):
-        problems.append(
-            f"angle_min {angle_min:.5f} != config {config.LIDAR_ANGLE_MIN_RAD:.5f}")
+        problems.append(f"angle_min {angle_min:.5f} != config {config.LIDAR_ANGLE_MIN_RAD:.5f}")
 
-    expected_step = (
-        (config.LIDAR_ANGLE_MAX_RAD - config.LIDAR_ANGLE_MIN_RAD) / config.LIDAR_SAMPLES
-    )
+    expected_step = (config.LIDAR_ANGLE_MAX_RAD - config.LIDAR_ANGLE_MIN_RAD) / config.LIDAR_SAMPLES
     if angle_step is not None and not math.isclose(angle_step, expected_step, rel_tol=2e-2):
         problems.append(
             f"angle_step {angle_step:.5f} != expected {expected_step:.5f} "
-            f"({config.LIDAR_SAMPLES} samples over the full circle)")
+            f"({config.LIDAR_SAMPLES} samples over the full circle)"
+        )
 
     if range_max is None:
         problems.append("range_max missing")
     elif not math.isclose(range_max, config.LIDAR_RANGE_MAX_M, rel_tol=1e-2):
-        problems.append(
-            f"range_max {range_max:.2f} != config {config.LIDAR_RANGE_MAX_M:.2f}")
+        problems.append(f"range_max {range_max:.2f} != config {config.LIDAR_RANGE_MAX_M:.2f}")
 
     if count is not None and int(count) != config.LIDAR_SAMPLES:
         problems.append(f"count {int(count)} != config {config.LIDAR_SAMPLES}")
 
     if problems:
         report.add(
-            f"{drone_id}: lidar geometry", FAIL,
+            f"{drone_id}: lidar geometry",
+            FAIL,
             "; ".join(problems)
             + ".\n           The avoider maps degrees to array indices using these "
-              "values; a mismatch aims the front cone somewhere other than the front.",
+            "values; a mismatch aims the front cone somewhere other than the front.",
         )
         return
 
-    report.add(f"{drone_id}: lidar geometry", PASS,
-               f"{config.LIDAR_SAMPLES} samples, angle_min={angle_min:.4f} rad, "
-               f"range_max={range_max:.1f} m")
+    report.add(
+        f"{drone_id}: lidar geometry",
+        PASS,
+        f"{config.LIDAR_SAMPLES} samples, angle_min={angle_min:.4f} rad, "
+        f"range_max={range_max:.1f} m",
+    )
 
 
 def check_pad_models(report: Report) -> None:
@@ -312,11 +331,13 @@ def check_pad_models(report: Report) -> None:
         if ids is None:
             problems.append(
                 f"{role}: {textures[0].name} does NOT decode as DICT_4X4_50 "
-                f"(no white quiet zone? see finding F1)")
+                f"(no white quiet zone? see finding F1)"
+            )
         elif expected_id not in ids.flatten().tolist():
             problems.append(
                 f"{role}: {textures[0].name} decodes as {ids.flatten().tolist()}, "
-                f"expected id {expected_id}")
+                f"expected id {expected_id}"
+            )
         else:
             checked.append(f"{model}=id{expected_id}")
 
@@ -347,7 +368,8 @@ async def check_mavsdk(report: Report, drone_id: str, timeout_s: float) -> None:
         await asyncio.wait_for(_wait_connected(), timeout=timeout_s)
     except asyncio.TimeoutError:
         report.add(
-            f"{drone_id}: mavsdk", FAIL,
+            f"{drone_id}: mavsdk",
+            FAIL,
             f"no MAVLink heartbeat on {url} within {timeout_s:.0f}s. "
             f"PX4 SITL instance {config.drone_index(drone_id)} is not running "
             f"(it publishes to 14540+instance).",
@@ -371,36 +393,38 @@ async def check_obstacle_service(report: Report, timeout_s: float = 5.0) -> None
     url = f"{config.OBSTACLE_MEMORY_URL}/"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=timeout_s)
-            ) as response:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout_s)) as response:
                 if response.status != 200:
-                    report.add("obstacle memory service", FAIL,
-                               f"{url} returned HTTP {response.status}")
+                    report.add(
+                        "obstacle memory service", FAIL, f"{url} returned HTTP {response.status}"
+                    )
                     return
                 body = await response.json()
     except Exception as exc:  # noqa: BLE001
         report.add(
-            "obstacle memory service", FAIL,
+            "obstacle memory service",
+            FAIL,
             f"{url} unreachable ({type(exc).__name__}). Start it with "
             f"`python3 -m obstacle_memory_service.app` -- without it, obstacle "
             f"prefetch returns nothing and detour planning has no memory to use.",
         )
         return
 
-    report.add("obstacle memory service", PASS,
-               f"{url} -> {body.get('service', 'ok')}")
+    report.add("obstacle memory service", PASS, f"{url} -> {body.get('service', 'ok')}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 async def run(drone_ids: list[str], skip: set[str], mavsdk_timeout_s: float) -> Report:
     report = Report()
 
-    print(f"Preflight: {len(drone_ids)} drone(s), world '{config.GZ_WORLD}', "
-          f"model '{config.GZ_MODEL_BASE}'\n")
+    print(
+        f"Preflight: {len(drone_ids)} drone(s), world '{config.GZ_WORLD}', "
+        f"model '{config.GZ_MODEL_BASE}'\n"
+    )
 
     if "pads" not in skip:
         check_pad_models(report)
@@ -433,16 +457,24 @@ def main(argv: list[str] | None = None) -> int:
         epilog="Exit 0 only if every selected check passes.",
     )
     parser.add_argument(
-        "--drone-id", action="append", dest="drone_ids", metavar="ID",
+        "--drone-id",
+        action="append",
+        dest="drone_ids",
+        metavar="ID",
         help="Check only this drone (repeatable). Default: config.DRONE_IDS.",
     )
     parser.add_argument(
-        "--skip", action="append", default=[],
+        "--skip",
+        action="append",
+        default=[],
         choices=["topics", "geometry", "mavsdk", "obstacles", "pads"],
         help="Skip a check group (repeatable).",
     )
     parser.add_argument(
-        "--mavsdk-timeout", type=float, default=10.0, metavar="S",
+        "--mavsdk-timeout",
+        type=float,
+        default=10.0,
+        metavar="S",
         help="Seconds to wait for a MAVLink heartbeat (default: 10).",
     )
     args = parser.parse_args(argv)

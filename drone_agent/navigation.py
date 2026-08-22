@@ -147,7 +147,11 @@ class ObstacleReporter:
 
         logger.info(
             "[%s] obstacle reported at (%.6f, %.6f), %.1f m ahead on bearing %.0f",
-            self._drone_id, obstacle_lat, obstacle_lon, clear_distance_m, heading_deg,
+            self._drone_id,
+            obstacle_lat,
+            obstacle_lon,
+            clear_distance_m,
+            heading_deg,
         )
 
     def _on_report_done(self, task: asyncio.Task) -> None:
@@ -166,11 +170,9 @@ class ObstacleReporter:
         await asyncio.wait(set(self._tasks), timeout=timeout_s)
 
 
-def altitude_correction(
-    current_alt_m: float, target_alt_m: float = config.TARGET_ALT_M
-) -> float:
+def altitude_correction(current_alt_m: float, target_alt_m: float = config.TARGET_ALT_M) -> float:
     """Down-velocity to hold an altitude. NED: negative climbs."""
-    error_m = target_alt_m - current_alt_m           # positive: too low
+    error_m = target_alt_m - current_alt_m  # positive: too low
     return geo.clamp(
         -error_m * config.ALT_GAIN,
         -config.ALT_MAX_VEL_M_S,
@@ -200,13 +202,11 @@ def dodge_velocity(bearing_deg: float, action: str) -> tuple[float, float]:
     side_deg = bearing_deg - 90.0 if action == "DODGE_LEFT" else bearing_deg + 90.0
     side_rad = math.radians(side_deg)
 
-    north = (
-        config.DODGE_SPEED_M_S * math.cos(side_rad)
-        - config.BACK_SPEED_M_S * math.cos(forward_rad)
+    north = config.DODGE_SPEED_M_S * math.cos(side_rad) - config.BACK_SPEED_M_S * math.cos(
+        forward_rad
     )
-    east = (
-        config.DODGE_SPEED_M_S * math.sin(side_rad)
-        - config.BACK_SPEED_M_S * math.sin(forward_rad)
+    east = config.DODGE_SPEED_M_S * math.sin(side_rad) - config.BACK_SPEED_M_S * math.sin(
+        forward_rad
     )
     return north, east
 
@@ -260,7 +260,10 @@ async def navigate_to(
 
     logger.info(
         "[%s] navigating to (%.6f, %.6f) at %.0f m",
-        drone_id, target_lat, target_lon, target_alt_m,
+        drone_id,
+        target_lat,
+        target_lon,
+        target_alt_m,
     )
 
     while waypoints:
@@ -270,9 +273,7 @@ async def navigate_to(
             now = time.monotonic()
 
             if now - started_at > timeout_s:
-                logger.error(
-                    "[%s] leg timed out after %.0fs without arriving", drone_id, timeout_s
-                )
+                logger.error("[%s] leg timed out after %.0fs without arriving", drone_id, timeout_s)
                 publisher.hold()
                 return NavOutcome.TIMEOUT
 
@@ -289,14 +290,15 @@ async def navigate_to(
                         "[%s] obstacle feed silent for %.1fs - holding position "
                         "instead of flying blind. Check avoider_node.py and "
                         "ros_gz_bridge for this drone (see RUN_GUIDE.md).",
-                        drone_id, age,
+                        drone_id,
+                        age,
                     )
                 status("OBSTACLE FEED DEAD - holding")
-                bearing = geo.get_bearing(
-                    drone_state["lat"], drone_state["lon"], leg_lat, leg_lon
-                )
+                bearing = geo.get_bearing(drone_state["lat"], drone_state["lon"], leg_lat, leg_lon)
                 publisher.command_ned(
-                    0.0, 0.0, altitude_correction(drone_state["alt"], target_alt_m),
+                    0.0,
+                    0.0,
+                    altitude_correction(drone_state["alt"], target_alt_m),
                     bearing,
                 )
                 await asyncio.sleep(dt_s)
@@ -316,27 +318,22 @@ async def navigate_to(
                 if waypoints:
                     logger.info(
                         "[%s] detour waypoint reached, %d remaining",
-                        drone_id, len(waypoints),
+                        drone_id,
+                        len(waypoints),
                     )
                     break
                 # Settle before handing over to the landing controller, so it
                 # starts from a stable hover rather than mid-deceleration.
                 publisher.hold(
-                    geo.get_bearing(
-                        drone_state["lat"], drone_state["lon"], leg_lat, leg_lon
-                    )
+                    geo.get_bearing(drone_state["lat"], drone_state["lon"], leg_lat, leg_lon)
                 )
-                publisher.setpoint.down_m_s = altitude_correction(
-                    drone_state["alt"], target_alt_m
-                )
+                publisher.setpoint.down_m_s = altitude_correction(drone_state["alt"], target_alt_m)
                 await asyncio.sleep(0.5)
                 logger.info("[%s] arrived (%.1f m from target)", drone_id, distance_m)
                 status("arrived")
                 return NavOutcome.ARRIVED
 
-            bearing = geo.get_bearing(
-                drone_state["lat"], drone_state["lon"], leg_lat, leg_lon
-            )
+            bearing = geo.get_bearing(drone_state["lat"], drone_state["lon"], leg_lat, leg_lon)
             down_m_s = altitude_correction(drone_state["alt"], target_alt_m)
             action = str(lidar_data.get("action", "CLEAR"))
             eff_front_m = float(lidar_data.get("eff_front_m", config.INF_REPLACE_M))
@@ -344,14 +341,12 @@ async def navigate_to(
             # ── report a newly discovered obstacle ───────────────────────────
             # `previous_action` is read BEFORE being reassigned. The old code
             # assigned first and then compared, so this branch was dead.
-            entering_dodge = (
-                action in ("DODGE_LEFT", "DODGE_RIGHT")
-                and previous_action not in ("DODGE_LEFT", "DODGE_RIGHT")
+            entering_dodge = action in ("DODGE_LEFT", "DODGE_RIGHT") and previous_action not in (
+                "DODGE_LEFT",
+                "DODGE_RIGHT",
             )
             if entering_dodge and reporter is not None:
-                reporter.report(
-                    drone_state["lat"], drone_state["lon"], bearing, eff_front_m
-                )
+                reporter.report(drone_state["lat"], drone_state["lon"], bearing, eff_front_m)
 
             # ── ESCALATE: reactive avoidance has failed, plan around it ──────
             if action == "ESCALATE":
@@ -373,20 +368,25 @@ async def navigate_to(
                             "[%s] %d detours attempted on this leg and still "
                             "blocked - holding for the operator rather than "
                             "generating ever longer paths.",
-                            drone_id, detour_attempts - 1,
+                            drone_id,
+                            detour_attempts - 1,
                         )
                         publisher.hold(bearing)
                         status("BLOCKED - detours exhausted")
                         return NavOutcome.ESCALATION_EXHAUSTED
 
                     new_waypoints = _plan_detour_from_here(
-                        drone_state, bearing, eff_front_m,
-                        (leg_lat, leg_lon), known_obstacles or [], drone_id,
+                        drone_state,
+                        bearing,
+                        eff_front_m,
+                        (leg_lat, leg_lon),
+                        known_obstacles or [],
+                        drone_id,
                     )
                     if new_waypoints:
                         waypoints = new_waypoints + waypoints[1:]
                         status(f"detouring ({detour_attempts})")
-                        break        # restart the inner loop on the new waypoint
+                        break  # restart the inner loop on the new waypoint
 
                     logger.warning(
                         "[%s] no detour found; continuing to dodge reactively",
@@ -396,7 +396,8 @@ async def navigate_to(
                 # While escalated but unable to plan, keep dodging rather than
                 # flying at the obstacle -- which is what the old TODO did.
                 target_north, target_east = dodge_velocity(
-                    bearing, previous_action if previous_action.startswith("DODGE") else "DODGE_LEFT"
+                    bearing,
+                    previous_action if previous_action.startswith("DODGE") else "DODGE_LEFT",
                 )
                 status("ESCALATED - dodging")
 
@@ -410,9 +411,7 @@ async def navigate_to(
                 status(f"cruising, {distance_m:.0f} m to go")
 
             # ── acceleration-limited command ─────────────────────────────────
-            publisher.command_slewed_ned(
-                target_north, target_east, down_m_s, bearing, dt_s
-            )
+            publisher.command_slewed_ned(target_north, target_east, down_m_s, bearing, dt_s)
 
             previous_action = action
             await asyncio.sleep(dt_s)
@@ -439,9 +438,7 @@ def _plan_detour_from_here(
 
     start = (drone_state["lat"], drone_state["lon"])
 
-    live_lat, live_lon = geo.offset_bearing(
-        start[0], start[1], bearing_deg, max(eff_front_m, 1.0)
-    )
+    live_lat, live_lon = geo.offset_bearing(start[0], start[1], bearing_deg, max(eff_front_m, 1.0))
     obstacles = [
         *known_obstacles,
         {
@@ -453,7 +450,9 @@ def _plan_detour_from_here(
     ]
 
     path = plan_detour(
-        start, goal, obstacles,
+        start,
+        goal,
+        obstacles,
         margin_m=config.DETOUR_MARGIN_M,
         max_iterations=config.DETOUR_MAX_ITERATIONS,
     )
@@ -463,10 +462,12 @@ def _plan_detour_from_here(
     if len(path) <= 2:
         return []
 
-    waypoints = path[1:]                     # drop `start`, we are already there
+    waypoints = path[1:]  # drop `start`, we are already there
     logger.info(
         "[%s] detour planned: %d waypoint(s) around an obstacle %.1f m ahead",
-        drone_id, len(waypoints), eff_front_m,
+        drone_id,
+        len(waypoints),
+        eff_front_m,
     )
     return waypoints
 
@@ -493,14 +494,18 @@ async def descend_to(
 
     logger.info(
         "[%s] changing altitude %.1f -> %.1f m",
-        drone_id, drone_state.get("alt", 0.0), target_alt_m,
+        drone_id,
+        drone_state.get("alt", 0.0),
+        target_alt_m,
     )
 
     while True:
         if time.monotonic() - started_at > timeout_s:
             logger.error(
                 "[%s] altitude change to %.1f m timed out at %.1f m",
-                drone_id, target_alt_m, drone_state.get("alt", 0.0),
+                drone_id,
+                target_alt_m,
+                drone_state.get("alt", 0.0),
             )
             publisher.hold(yaw_deg)
             return False

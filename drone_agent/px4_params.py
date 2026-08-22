@@ -94,7 +94,8 @@ async def apply_params(
     if problems:
         logger.warning(
             "PX4 tuning applied with %d problem(s): %s",
-            len(problems), "; ".join(problems),
+            len(problems),
+            "; ".join(problems),
         )
     logger.info(
         "PX4 tuning confirmed: %s",
@@ -147,18 +148,14 @@ async def upload_geofence(
 
     try:
         await asyncio.wait_for(
-            drone.geofence.upload_geofence(
-                GeofenceData([polygon], [])
-            ),
+            drone.geofence.upload_geofence(GeofenceData([polygon], [])),
             timeout=10.0,
         )
     except TypeError:
         # MAVSDK's geofence API changed shape across 2.x point releases: older
         # builds take a bare list of polygons. Try that before giving up.
         try:
-            await asyncio.wait_for(
-                drone.geofence.upload_geofence([polygon]), timeout=10.0
-            )
+            await asyncio.wait_for(drone.geofence.upload_geofence([polygon]), timeout=10.0)
         except Exception as exc:  # noqa: BLE001
             logger.error("geofence upload failed on both API shapes: %s", exc)
             return False
@@ -170,6 +167,10 @@ async def upload_geofence(
     logger.info(
         "geofence uploaded: %d-point inclusion polygon, r=%.0f m around "
         "(%.6f, %.6f); polygon sits up to %.1f m inside the circle",
-        points, radius_m, centre_lat, centre_lon, inscribed_error_m,
+        points,
+        radius_m,
+        centre_lat,
+        centre_lon,
+        inscribed_error_m,
     )
     return True

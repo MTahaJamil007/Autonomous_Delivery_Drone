@@ -7,10 +7,9 @@ escalation is exercised in microseconds and the test cannot flake on a slow
 machine or an NTP step.
 """
 
-from pathlib import Path
-
 import json
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -29,13 +28,14 @@ from avoider_node import (
     validate_scan_geometry,
 )
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 #  Scan synthesis
 # ─────────────────────────────────────────────────────────────────────────────
 
-def make_scan(front_m: float, left_m: float = 12.0, right_m: float = 12.0,
-              samples: int = config.LIDAR_SAMPLES) -> list[float]:
+
+def make_scan(
+    front_m: float, left_m: float = 12.0, right_m: float = 12.0, samples: int = config.LIDAR_SAMPLES
+) -> list[float]:
     """A synthetic 360-sample scan with the given distance in each sector.
 
     Index i corresponds to angle_min + i * increment, matching the real message
@@ -58,15 +58,14 @@ def make_scan(front_m: float, left_m: float = 12.0, right_m: float = 12.0,
 
 
 def summarize(ranges: list[float]) -> tuple[float, float, float]:
-    increment = (
-        (config.LIDAR_ANGLE_MAX_RAD - config.LIDAR_ANGLE_MIN_RAD) / len(ranges)
-    )
+    increment = (config.LIDAR_ANGLE_MAX_RAD - config.LIDAR_ANGLE_MIN_RAD) / len(ranges)
     return summarize_scan(ranges, config.LIDAR_ANGLE_MIN_RAD, increment)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  P2 acceptance: the replay test
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_replay_clear_dodge_escalate_clear_without_wall_clock():
     """A recorded scan sequence drives the full state cycle deterministically.
@@ -78,13 +77,18 @@ def test_replay_clear_dodge_escalate_clear_without_wall_clock():
     # (elapsed_s, front_m) -- a wall closes in, blocks for well over the
     # escalation window, then clears and stays clear.
     script = [
-        (0.0, 15.0), (0.1, 15.0),                  # open road
-        (0.2, 5.0),                                # wall detected -> dodge
-        (1.0, 5.0), (5.0, 5.0), (11.0, 5.0),       # still blocked, not yet 12 s
-        (12.5, 5.0), (14.0, 5.0),                  # past the window -> escalate
-        (14.5, 15.0),                              # front opens
-        (15.0, 15.0), (16.0, 15.0),                # confirming (needs 2.5 s)
-        (17.5, 15.0),                              # confirmed -> clear
+        (0.0, 15.0),
+        (0.1, 15.0),  # open road
+        (0.2, 5.0),  # wall detected -> dodge
+        (1.0, 5.0),
+        (5.0, 5.0),
+        (11.0, 5.0),  # still blocked, not yet 12 s
+        (12.5, 5.0),
+        (14.0, 5.0),  # past the window -> escalate
+        (14.5, 15.0),  # front opens
+        (15.0, 15.0),
+        (16.0, 15.0),  # confirming (needs 2.5 s)
+        (17.5, 15.0),  # confirmed -> clear
     ]
 
     dodge_dir = None
@@ -93,14 +97,20 @@ def test_replay_clear_dodge_escalate_clear_without_wall_clock():
     observed = []
 
     for elapsed_s, front_m in script:
-        eff_front, med_left, med_right = summarize(
-            make_scan(front_m, left_m=12.0, right_m=8.0)
-        )
+        eff_front, med_left, med_right = summarize(make_scan(front_m, left_m=12.0, right_m=8.0))
         action, dodge_dir, dodge_start_t, clear_first_seen = decide_action(
-            eff_front, med_left, med_right, elapsed_s,
-            dodge_dir, dodge_start_t, clear_first_seen,
-            config.SAFE_DIST, config.CLEAR_DIST, config.CLEAR_CONFIRM_S,
-            config.MIN_LOCK_S, config.ESCALATION_LOCK_S,
+            eff_front,
+            med_left,
+            med_right,
+            elapsed_s,
+            dodge_dir,
+            dodge_start_t,
+            clear_first_seen,
+            config.SAFE_DIST,
+            config.CLEAR_DIST,
+            config.CLEAR_CONFIRM_S,
+            config.MIN_LOCK_S,
+            config.ESCALATION_LOCK_S,
         )
         observed.append((elapsed_s, action))
 
@@ -108,8 +118,7 @@ def test_replay_clear_dodge_escalate_clear_without_wall_clock():
 
     assert actions[0] == CLEAR, f"open road must be CLEAR, got {actions[0]}"
     assert actions[2] == DODGE_LEFT, (
-        f"left sector is more open (12 m vs 8 m) so the dodge must go left, "
-        f"got {actions[2]}"
+        f"left sector is more open (12 m vs 8 m) so the dodge must go left, got {actions[2]}"
     )
     # Not yet escalated at 11 s.
     assert actions[5] == DODGE_LEFT, f"11 s < 12 s must still be a dodge, got {actions[5]}"
@@ -129,14 +138,25 @@ def test_replay_clear_dodge_escalate_clear_without_wall_clock():
 
 def test_dodge_direction_follows_the_more_open_side():
     """The committed side must be the one with more room."""
-    for left_m, right_m, expected in [(12.0, 4.0, DODGE_LEFT),
-                                      (4.0, 12.0, DODGE_RIGHT),
-                                      (8.0, 8.0, DODGE_LEFT)]:  # tie -> left
+    for left_m, right_m, expected in [
+        (12.0, 4.0, DODGE_LEFT),
+        (4.0, 12.0, DODGE_RIGHT),
+        (8.0, 8.0, DODGE_LEFT),
+    ]:  # tie -> left
         eff_front, med_left, med_right = summarize(make_scan(5.0, left_m, right_m))
         action, *_ = decide_action(
-            eff_front, med_left, med_right, 0.0, None, 0.0, 0.0,
-            config.SAFE_DIST, config.CLEAR_DIST, config.CLEAR_CONFIRM_S,
-            config.MIN_LOCK_S, config.ESCALATION_LOCK_S,
+            eff_front,
+            med_left,
+            med_right,
+            0.0,
+            None,
+            0.0,
+            0.0,
+            config.SAFE_DIST,
+            config.CLEAR_DIST,
+            config.CLEAR_CONFIRM_S,
+            config.MIN_LOCK_S,
+            config.ESCALATION_LOCK_S,
         )
         assert action == expected, (
             f"left={left_m} right={right_m} should give {expected}, got {action}"
@@ -147,18 +167,36 @@ def test_dodge_does_not_unlock_before_min_lock():
     """One lucky clear reading must not abort a dodge that just started."""
     eff_front, med_left, med_right = summarize(make_scan(5.0))
     action, dodge_dir, start_t, clear_seen = decide_action(
-        eff_front, med_left, med_right, 100.0, None, 0.0, 0.0,
-        config.SAFE_DIST, config.CLEAR_DIST, config.CLEAR_CONFIRM_S,
-        config.MIN_LOCK_S, config.ESCALATION_LOCK_S,
+        eff_front,
+        med_left,
+        med_right,
+        100.0,
+        None,
+        0.0,
+        0.0,
+        config.SAFE_DIST,
+        config.CLEAR_DIST,
+        config.CLEAR_CONFIRM_S,
+        config.MIN_LOCK_S,
+        config.ESCALATION_LOCK_S,
     )
     assert dodge_dir is not None
 
     # Front looks wide open only 0.5 s later - well inside MIN_LOCK_S.
     clear_front, left, right = summarize(make_scan(15.0))
     action, dodge_dir, start_t, clear_seen = decide_action(
-        clear_front, left, right, 100.5, dodge_dir, start_t, clear_seen,
-        config.SAFE_DIST, config.CLEAR_DIST, config.CLEAR_CONFIRM_S,
-        config.MIN_LOCK_S, config.ESCALATION_LOCK_S,
+        clear_front,
+        left,
+        right,
+        100.5,
+        dodge_dir,
+        start_t,
+        clear_seen,
+        config.SAFE_DIST,
+        config.CLEAR_DIST,
+        config.CLEAR_CONFIRM_S,
+        config.MIN_LOCK_S,
+        config.ESCALATION_LOCK_S,
     )
     assert action != CLEAR, "MIN_LOCK_S must hold the dodge"
 
@@ -174,16 +212,34 @@ def test_hysteresis_band_keeps_dodging():
 
     eff, left, right = summarize(make_scan(5.0))
     _, dodge_dir, start_t, clear_seen = decide_action(
-        eff, left, right, 0.0, None, 0.0, 0.0,
-        config.SAFE_DIST, config.CLEAR_DIST, config.CLEAR_CONFIRM_S,
-        config.MIN_LOCK_S, config.ESCALATION_LOCK_S,
+        eff,
+        left,
+        right,
+        0.0,
+        None,
+        0.0,
+        0.0,
+        config.SAFE_DIST,
+        config.CLEAR_DIST,
+        config.CLEAR_CONFIRM_S,
+        config.MIN_LOCK_S,
+        config.ESCALATION_LOCK_S,
     )
 
     eff, left, right = summarize(make_scan(mid_m))
     action, _, _, _ = decide_action(
-        eff, left, right, 5.0, dodge_dir, start_t, clear_seen,
-        config.SAFE_DIST, config.CLEAR_DIST, config.CLEAR_CONFIRM_S,
-        config.MIN_LOCK_S, config.ESCALATION_LOCK_S,
+        eff,
+        left,
+        right,
+        5.0,
+        dodge_dir,
+        start_t,
+        clear_seen,
+        config.SAFE_DIST,
+        config.CLEAR_DIST,
+        config.CLEAR_CONFIRM_S,
+        config.MIN_LOCK_S,
+        config.ESCALATION_LOCK_S,
     )
     assert action == dodge_dir, (
         f"{mid_m} m is inside the hysteresis band and must not clear the dodge"
@@ -194,6 +250,7 @@ def test_hysteresis_band_keeps_dodging():
 #  Self-hit masking
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_propeller_returns_are_masked_not_treated_as_a_wall():
     """A 0.29 m prop return must not read as an unclearable obstacle.
 
@@ -201,33 +258,36 @@ def test_propeller_returns_are_masked_not_treated_as_a_wall():
     genuine returns from a real object. Without the mask the avoider locks a
     dodge it can never clear, escalates, and the mission stalls forever.
     """
-    assert config.MIN_VALID_RANGE_M > 0.29, (
-        "the mask must clear the propeller radius"
-    )
-    assert config.MIN_VALID_RANGE_M < config.SAFE_DIST, (
-        "the mask must not swallow real obstacles"
-    )
+    assert config.MIN_VALID_RANGE_M > 0.29, "the mask must clear the propeller radius"
+    assert config.MIN_VALID_RANGE_M < config.SAFE_DIST, "the mask must not swallow real obstacles"
 
     assert clean_range(0.29) == config.INF_REPLACE_M
-    assert clean_range(0.16) == config.INF_REPLACE_M      # above sensor floor, still a prop
-    assert clean_range(7.0) == 7.0                        # a real obstacle survives
+    assert clean_range(0.16) == config.INF_REPLACE_M  # above sensor floor, still a prop
+    assert clean_range(7.0) == 7.0  # a real obstacle survives
 
     # A whole scan of prop returns must read as clear, not as a wall.
     eff_front, _, _ = summarize(make_scan(0.29))
     assert eff_front == config.INF_REPLACE_M
     action, *_ = decide_action(
-        eff_front, 15.0, 15.0, 0.0, None, 0.0, 0.0,
-        config.SAFE_DIST, config.CLEAR_DIST, config.CLEAR_CONFIRM_S,
-        config.MIN_LOCK_S, config.ESCALATION_LOCK_S,
+        eff_front,
+        15.0,
+        15.0,
+        0.0,
+        None,
+        0.0,
+        0.0,
+        config.SAFE_DIST,
+        config.CLEAR_DIST,
+        config.CLEAR_CONFIRM_S,
+        config.MIN_LOCK_S,
+        config.ESCALATION_LOCK_S,
     )
     assert action == CLEAR, "a scan of nothing but prop hits must read as CLEAR"
 
 
 def test_empty_world_reads_as_clear():
     """P2 acceptance: hovering in an empty world, eff_front is the inf substitute."""
-    eff_front, med_left, med_right = summarize(
-        [float("inf")] * config.LIDAR_SAMPLES
-    )
+    eff_front, med_left, med_right = summarize([float("inf")] * config.LIDAR_SAMPLES)
     assert eff_front == config.INF_REPLACE_M == 15.0
     assert med_left == med_right == config.INF_REPLACE_M
     assert config.INF_REPLACE_M > config.CLEAR_DIST, (
@@ -258,13 +318,14 @@ def test_narrow_obstacle_is_not_averaged_away():
 #  Geometry validation
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_geometry_validation_accepts_the_configured_sensor():
-    increment = (
-        (config.LIDAR_ANGLE_MAX_RAD - config.LIDAR_ANGLE_MIN_RAD) / config.LIDAR_SAMPLES
-    )
+    increment = (config.LIDAR_ANGLE_MAX_RAD - config.LIDAR_ANGLE_MIN_RAD) / config.LIDAR_SAMPLES
     problems = validate_scan_geometry(
-        config.LIDAR_SAMPLES, config.LIDAR_ANGLE_MIN_RAD,
-        increment, config.LIDAR_RANGE_MAX_M,
+        config.LIDAR_SAMPLES,
+        config.LIDAR_ANGLE_MIN_RAD,
+        increment,
+        config.LIDAR_RANGE_MAX_M,
     )
     assert problems == [], f"the configured sensor must validate cleanly: {problems}"
 
@@ -281,17 +342,16 @@ def test_geometry_validation_rejects_a_changed_sensor():
 
 def test_sector_indices_are_derived_not_assumed():
     """Sector lookup must follow the message's own angle_min/increment."""
-    samples = 720                     # twice the configured resolution
+    samples = 720  # twice the configured resolution
     increment = 2 * math.pi / samples
     ranges = [float("inf")] * samples
     # Put a close return at exactly straight ahead for this resolution.
     ranges[samples // 2] = 4.0
 
-    front = sector_ranges(ranges, -math.pi, increment,
-                          -config.FRONT_HALF_DEG, config.FRONT_HALF_DEG)
-    assert min(front) == 4.0, (
-        "the front sector must find a straight-ahead return at any resolution"
+    front = sector_ranges(
+        ranges, -math.pi, increment, -config.FRONT_HALF_DEG, config.FRONT_HALF_DEG
     )
+    assert min(front) == 4.0, "the front sector must find a straight-ahead return at any resolution"
     assert len(front) == 2 * config.FRONT_HALF_DEG + 1
 
 
@@ -303,6 +363,7 @@ def test_median_of_empty_sector_is_the_inf_substitute():
 # ─────────────────────────────────────────────────────────────────────────────
 #  Vision contract
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_two_markers_appear_in_one_frame_with_distinct_ids():
     """P2 acceptance: both markers in frame, both reported, IDs correct.
@@ -319,7 +380,7 @@ def test_two_markers_appear_in_one_frame_with_distinct_ids():
     canvas = np.full((240, 320, 3), 255, np.uint8)
     for marker_id, x in ((1, 20), (2, 190)):
         tile = cv2.aruco.generateImageMarker(dictionary, marker_id, 80)
-        canvas[80:160, x:x + 80] = cv2.cvtColor(tile, cv2.COLOR_GRAY2BGR)
+        canvas[80:160, x : x + 80] = cv2.cvtColor(tile, cv2.COLOR_GRAY2BGR)
 
     detections = ArucoDetectorWrapper().detect(canvas)
     ids = sorted(d["id"] for d in detections)
@@ -359,8 +420,12 @@ def test_vision_payload_is_json_serialisable_and_complete():
     assert len(detections) == 1
 
     payload = {
-        "t": 123.456, "seq": 7, "w": 320, "h": 240,
-        "fx": config.CAMERA_FX_PX, "drone_id": "drone-0",
+        "t": 123.456,
+        "seq": 7,
+        "w": 320,
+        "h": 240,
+        "fx": config.CAMERA_FX_PX,
+        "drone_id": "drone-0",
         "detections": detections,
     }
     round_tripped = json.loads(json.dumps(payload))
@@ -372,7 +437,7 @@ def test_vision_payload_is_json_serialisable_and_complete():
 
 
 def test_empty_detection_frames_are_still_reported():
-    """"No marker" and "bridge dead" must be distinguishable.
+    """ "No marker" and "bridge dead" must be distinguishable.
 
     An empty detections list is a positive statement that the camera is alive
     and sees nothing. Sending nothing at all is indistinguishable from a crashed
@@ -387,6 +452,7 @@ def test_empty_detection_frames_are_still_reported():
 # ─────────────────────────────────────────────────────────────────────────────
 #  Fail-closed staleness
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_never_heard_from_counts_as_stale():
     """The fail-closed guard's core case: no data is not "clear".

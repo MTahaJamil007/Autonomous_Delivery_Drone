@@ -7,9 +7,8 @@ is placed where the obstacle actually is, deduplicated, persisted across a
 restart, and that a prefetched obstacle genuinely changes the planned route.
 """
 
-from pathlib import Path
-
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -18,10 +17,10 @@ from drone_agent import geo
 from drone_agent.navigation import ObstacleReporter
 from global_planner.detour import plan_detour, point_to_line_distance
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 #  P5.2 where the obstacle is recorded
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_the_report_is_placed_ahead_of_the_drone_not_at_it():
     """The LiDAR measured clear space; the obstacle is beyond it.
@@ -32,7 +31,7 @@ def test_the_report_is_placed_ahead_of_the_drone_not_at_it():
     still clips the wall.
     """
     drone_lat, drone_lon = 30.0315, 72.3140
-    heading_deg = 0.0                  # due north
+    heading_deg = 0.0  # due north
     clear_distance_m = 6.0
 
     obstacle_lat, obstacle_lon = geo.offset_bearing(
@@ -41,9 +40,9 @@ def test_the_report_is_placed_ahead_of_the_drone_not_at_it():
 
     assert obstacle_lat > drone_lat, "north of the drone, not at it"
     assert obstacle_lon == pytest.approx(drone_lon, abs=1e-9)
-    assert geo.get_distance_m(
-        drone_lat, drone_lon, obstacle_lat, obstacle_lon
-    ) == pytest.approx(clear_distance_m, rel=1e-6)
+    assert geo.get_distance_m(drone_lat, drone_lon, obstacle_lat, obstacle_lon) == pytest.approx(
+        clear_distance_m, rel=1e-6
+    )
 
 
 def test_a_long_wall_is_reported_once_not_fifty_times():
@@ -105,6 +104,7 @@ async def test_report_task_exceptions_are_logged_not_swallowed():
 #  P5.1 / P5.4 the detour actually changes the route
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_a_known_obstacle_changes_the_planned_route():
     """P5.4: this is the observable difference between a database and a log.
 
@@ -112,7 +112,7 @@ def test_a_known_obstacle_changes_the_planned_route():
     write-only decoration.
     """
     start = (30.0315, 72.3140)
-    goal = geo.local_enu_to_lat_lon(0.0, 60.0, *start)      # 60 m due north
+    goal = geo.local_enu_to_lat_lon(0.0, 60.0, *start)  # 60 m due north
 
     direct = plan_detour(start, goal, obstacles=[], margin_m=config.DETOUR_MARGIN_M)
     assert direct == [start, goal], "no obstacles means no detour"
@@ -128,9 +128,7 @@ def test_a_known_obstacle_changes_the_planned_route():
     # Every intermediate waypoint must actually clear the obstacle.
     for waypoint in routed[1:-1]:
         clearance_m = geo.get_distance_m(*waypoint, wall_lat, wall_lon)
-        assert clearance_m >= 15.0, (
-            f"detour waypoint only {clearance_m:.1f} m from a 15 m obstacle"
-        )
+        assert clearance_m >= 15.0, f"detour waypoint only {clearance_m:.1f} m from a 15 m obstacle"
 
 
 def test_the_detour_margin_is_at_least_the_reactive_trigger_distance():
@@ -154,7 +152,9 @@ def test_detour_recursion_is_bounded():
     ]
 
     routed = plan_detour(
-        start, goal, obstacles,
+        start,
+        goal,
+        obstacles,
         margin_m=config.DETOUR_MARGIN_M,
         max_iterations=config.DETOUR_MAX_ITERATIONS,
     )
@@ -171,7 +171,8 @@ def test_an_obstacle_off_the_path_is_ignored():
     aside_lat, aside_lon = geo.local_enu_to_lat_lon(80.0, 30.0, *start)
 
     routed = plan_detour(
-        start, goal,
+        start,
+        goal,
         [{"lat": aside_lat, "lon": aside_lon, "radius_m": 5.0}],
         margin_m=config.DETOUR_MARGIN_M,
     )
@@ -183,14 +184,13 @@ def test_point_to_line_distance_handles_the_degenerate_segment():
     point = (30.0320, 72.3140)
     same = (30.0315, 72.3140)
     distance_m = point_to_line_distance(point, same, same)
-    assert distance_m == pytest.approx(
-        geo.get_distance_m(*point, *same), rel=1e-3
-    )
+    assert distance_m == pytest.approx(geo.get_distance_m(*point, *same), rel=1e-3)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  P5.3 persistence
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def obstacle_db(tmp_path, monkeypatch):
@@ -220,8 +220,11 @@ async def test_one_wall_becomes_one_row_with_rising_confidence(obstacle_db):
     for offset_m in (2.0, 3.5, 1.0):
         near_lat, near_lon = geo.offset_bearing(wall_lat, wall_lon, 90.0, offset_m)
         merged_id = await obstacle_db.upsert_obstacle(
-            near_lat, near_lon, radius_m=15.0,
-            source_drone="drone-1", confidence=0.5,
+            near_lat,
+            near_lon,
+            radius_m=15.0,
+            source_drone="drone-1",
+            confidence=0.5,
         )
         assert merged_id == first_id, "nearby sightings must merge, not multiply"
 
@@ -241,9 +244,7 @@ async def test_a_distant_obstacle_is_a_separate_row(obstacle_db):
     await obstacle_db.init_database()
     await obstacle_db.upsert_obstacle(30.0320, 72.3145, confidence=0.5)
 
-    far_lat, far_lon = geo.offset_bearing(
-        30.0320, 72.3145, 0.0, config.OBSTACLE_MERGE_RADIUS_M * 5
-    )
+    far_lat, far_lon = geo.offset_bearing(30.0320, 72.3145, 0.0, config.OBSTACLE_MERGE_RADIUS_M * 5)
     await obstacle_db.upsert_obstacle(far_lat, far_lon, confidence=0.5)
 
     assert len(await obstacle_db.get_all_obstacles()) == 2
@@ -289,7 +290,9 @@ async def test_bbox_query_returns_the_wall_a_mission_would_prefetch(obstacle_db)
     for key in ("lat", "lon", "radius_m", "confidence"):
         assert key in obstacle
     routed = plan_detour(
-        (30.0315, 72.3140), (30.0330, 72.3160), found,
+        (30.0315, 72.3140),
+        (30.0330, 72.3160),
+        found,
         margin_m=config.DETOUR_MARGIN_M,
     )
     assert len(routed) > 2, "a prefetched obstacle must be usable by the planner"
@@ -342,8 +345,7 @@ def test_the_in_memory_duplicate_service_is_gone():
 def test_the_obstacle_service_imports_from_any_working_directory():
     """`from db import ...` only resolved from inside the package directory."""
     source = (
-        Path(__file__).resolve().parents[1]
-        / "obstacle_memory_service" / "app.py"
+        Path(__file__).resolve().parents[1] / "obstacle_memory_service" / "app.py"
     ).read_text()
     assert "from obstacle_memory_service.db import" in source
     assert "\nfrom db import" not in source

@@ -5,47 +5,48 @@ Provides functions for drone agents to interact with the obstacle memory service
 Per specification: obstacles are fetched ONCE at mission start and cached.
 """
 
-import aiohttp
 import logging
-from typing import List, Dict, Any, Tuple
+from typing import Any
 
-import sys
-from pathlib import Path
+import aiohttp
+
 import config
 
 logger = logging.getLogger(__name__)
 
 
 async def fetch_known_obstacles_for_mission(
-    bbox: Tuple[float, float, float, float]
-) -> List[Dict[str, Any]]:
+    bbox: tuple[float, float, float, float],
+) -> list[dict[str, Any]]:
     """
     Fetch known obstacles for a mission's bounding box.
-    
+
     Called exactly ONCE, before Leg 1 of a mission begins. The result is
     cached for the entire mission — per specification, obstacle memory does
     NOT poll mid-mission or subscribe live.
-    
+
     Args:
         bbox: (min_lat, max_lat, min_lon, max_lon) bounding box
-        
+
     Returns:
         List of obstacle dicts from the memory service
     """
     min_lat, max_lat, min_lon, max_lon = bbox
-    
+
     url = f"{config.OBSTACLE_MEMORY_URL}/obstacles"
     params = {
         "min_lat": min_lat,
         "max_lat": max_lat,
         "min_lon": min_lon,
         "max_lon": max_lon,
-        "min_confidence": 0.15
+        "min_confidence": 0.15,
     }
-    
+
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5.0)) as response:
+            async with session.get(
+                url, params=params, timeout=aiohttp.ClientTimeout(total=5.0)
+            ) as response:
                 if response.status == 200:
                     data = await response.json()
                     obstacles = data.get("obstacles", [])
@@ -57,11 +58,11 @@ async def fetch_known_obstacles_for_mission(
                 else:
                     logger.error(f"Obstacle service returned status {response.status}")
                     return []
-    
+
     except aiohttp.ClientError as e:
         logger.error(f"Failed to fetch obstacles from memory service: {e}")
         return []
-    
+
     except Exception as e:
         logger.error(f"Unexpected error fetching obstacles: {e}", exc_info=True)
         return []
@@ -73,20 +74,20 @@ async def report_obstacle(
     source_drone: str,
     radius_m: float = 3.0,
     obstacle_type: str = "static_wall",
-    confidence: float = 0.5
+    confidence: float = 0.5,
 ) -> bool:
     """
     Report a newly discovered obstacle to the memory service.
-    
+
     Called by avoider_node on first DODGE_* lock for a not-yet-known wall.
-    
+
     Args:
         lat, lon: Obstacle coordinates
         source_drone: Reporting drone ID
         radius_m: Obstacle radius
         obstacle_type: Classification
         confidence: Initial confidence
-        
+
     Returns:
         True if report succeeded, False otherwise
     """
@@ -97,12 +98,14 @@ async def report_obstacle(
         "radius_m": radius_m,
         "obstacle_type": obstacle_type,
         "source_drone": source_drone,
-        "confidence": confidence
+        "confidence": confidence,
     }
-    
+
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=5.0)) as response:
+            async with session.post(
+                url, json=payload, timeout=aiohttp.ClientTimeout(total=5.0)
+            ) as response:
                 if response.status == 200:
                     data = await response.json()
                     obstacle_id = data.get("obstacle_id")
@@ -112,15 +115,13 @@ async def report_obstacle(
                     )
                     return True
                 else:
-                    logger.error(
-                        f"Failed to report obstacle: status {response.status}"
-                    )
+                    logger.error(f"Failed to report obstacle: status {response.status}")
                     return False
-    
+
     except aiohttp.ClientError as e:
         logger.error(f"Failed to report obstacle to memory service: {e}")
         return False
-    
+
     except Exception as e:
         logger.error(f"Unexpected error reporting obstacle: {e}", exc_info=True)
         return False

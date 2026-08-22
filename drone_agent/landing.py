@@ -72,6 +72,7 @@ class LandingOutcome:
 #  MARKER DISAMBIGUATION
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def select_target(detections: list[dict], expected_id: int) -> dict | None:
     """The detection matching expected_id, or None.
 
@@ -86,6 +87,7 @@ def select_target(detections: list[dict], expected_id: int) -> dict | None:
 # ═════════════════════════════════════════════════════════════════════════════
 #  SMOOTHING
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 class EMAFilter:
     """Exponential moving average over a 3-tuple.
@@ -111,7 +113,10 @@ class EMAFilter:
         else:
             self._state = tuple(
                 self._alpha * new + (1.0 - self._alpha) * old
-                for new, old in zip(sample, self._state)
+                # strict=True: a length mismatch means the caller changed the
+                # tuple shape, which should fail loudly rather than silently
+                # dropping an axis of the offset.
+                for new, old in zip(sample, self._state, strict=True)
             )
         return self._state
 
@@ -124,6 +129,7 @@ class EMAFilter:
 # ═════════════════════════════════════════════════════════════════════════════
 #  PIXEL -> METRE CONVERSION (the F4 fix)
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def pixel_to_ground_offset_m(
     err_px: float, altitude_m: float, fx_px: float = config.CAMERA_FX_PX
@@ -199,6 +205,7 @@ def descent_rate_m_s(altitude_m: float) -> float:
 #  SEARCH PATTERN
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def camera_footprint_m(altitude_m: float) -> float:
     """Ground width the camera sees at this altitude."""
     return 2.0 * altitude_m * math.tan(config.CAMERA_HFOV_RAD / 2.0)
@@ -236,7 +243,8 @@ def generate_spiral_waypoints(
             lat, lon = geo.local_enu_to_lat_lon(
                 radius_m * math.cos(angle_rad),
                 radius_m * math.sin(angle_rad),
-                center_lat, center_lon,
+                center_lat,
+                center_lon,
             )
             waypoints.append((lat, lon))
 
@@ -255,8 +263,7 @@ def search_timeout_s(
     battery that the return leg needs. config.LANDING_TIMEOUT_MAX_S caps it.
     """
     path_m = sum(
-        geo.get_distance_m(*waypoints[i], *waypoints[i + 1])
-        for i in range(len(waypoints) - 1)
+        geo.get_distance_m(*waypoints[i], *waypoints[i + 1]) for i in range(len(waypoints) - 1)
     )
     estimated_s = path_m / max(speed_m_s, 0.1) + 15.0
     return min(max(config.LANDING_TIMEOUT_S, estimated_s), config.LANDING_TIMEOUT_MAX_S)
@@ -265,6 +272,7 @@ def search_timeout_s(
 # ═════════════════════════════════════════════════════════════════════════════
 #  TOUCHDOWN DETECTION
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def is_on_ground(drone_state: dict[str, Any]) -> bool:
     """True when the autopilot itself says we have landed.
@@ -287,6 +295,7 @@ def is_on_ground(drone_state: dict[str, Any]) -> bool:
 # ═════════════════════════════════════════════════════════════════════════════
 #  MAIN LANDING ROUTINE
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 async def execute_precision_landing(
     publisher: SetpointPublisher,
@@ -311,10 +320,11 @@ async def execute_precision_landing(
     offboard.
     """
     logger.info(
-        "[%s] landing on marker %d; pad spans ~%.0f px at %.0f m "
-        "(needs >= %.0f px to decode)",
-        drone_id, expected_marker_id,
-        config.marker_px_at_altitude(search_alt_m), search_alt_m,
+        "[%s] landing on marker %d; pad spans ~%.0f px at %.0f m (needs >= %.0f px to decode)",
+        drone_id,
+        expected_marker_id,
+        config.marker_px_at_altitude(search_alt_m),
+        search_alt_m,
         config.MARKER_MIN_DECODE_PX,
     )
 
@@ -322,17 +332,16 @@ async def execute_precision_landing(
 
     # ── Descend to the acquisition altitude FIRST (half of the F3 fix) ───────
     if drone_state.get("alt", 0.0) > search_alt_m + 1.0:
-        await descend_to(
-            publisher, drone_state, search_alt_m, drone_id=drone_id
-        )
+        await descend_to(publisher, drone_state, search_alt_m, drone_id=drone_id)
 
-    waypoints = generate_spiral_waypoints(
-        expected_lat, expected_lon, altitude_m=search_alt_m
-    )
+    waypoints = generate_spiral_waypoints(expected_lat, expected_lon, altitude_m=search_alt_m)
     timeout_s = search_timeout_s(waypoints)
     logger.info(
         "[%s] spiral: %d waypoints, %.1f m ring spacing, %.0f s budget",
-        drone_id, len(waypoints), config.search_ring_step_m(search_alt_m), timeout_s,
+        drone_id,
+        len(waypoints),
+        config.search_ring_step_m(search_alt_m),
+        timeout_s,
     )
 
     offset_filter = EMAFilter()
@@ -358,7 +367,9 @@ async def execute_precision_landing(
         if elapsed > timeout_s:
             logger.error(
                 "[%s] marker %d not acquired within %.0f s",
-                drone_id, expected_marker_id, timeout_s,
+                drone_id,
+                expected_marker_id,
+                timeout_s,
             )
             publisher.hold(heading_deg)
             publisher.setpoint.down_m_s = altitude_correction(altitude_m, search_alt_m)
@@ -374,7 +385,9 @@ async def execute_precision_landing(
             if descending:
                 logger.error(
                     "[%s] vision feed went silent mid-descent at %.1f m - "
-                    "stopping the descent and holding.", drone_id, altitude_m,
+                    "stopping the descent and holding.",
+                    drone_id,
+                    altitude_m,
                 )
                 descending = False
             publisher.hold(heading_deg)
@@ -391,7 +404,9 @@ async def execute_precision_landing(
                 locked = True
                 logger.info(
                     "[%s] marker %d locked at %.1f m (%.0f px wide)",
-                    drone_id, expected_marker_id, altitude_m,
+                    drone_id,
+                    expected_marker_id,
+                    altitude_m,
                     target.get("size_px", 0.0),
                 )
                 if fsm is not None:
@@ -408,11 +423,13 @@ async def execute_precision_landing(
             else:
                 forward_cmd = geo.clamp(
                     config.LANDING_K_P * forward_m,
-                    -config.LANDING_MAX_VEL_M_S, config.LANDING_MAX_VEL_M_S,
+                    -config.LANDING_MAX_VEL_M_S,
+                    config.LANDING_MAX_VEL_M_S,
                 )
                 right_cmd = geo.clamp(
                     config.LANDING_K_P * right_m,
-                    -config.LANDING_MAX_VEL_M_S, config.LANDING_MAX_VEL_M_S,
+                    -config.LANDING_MAX_VEL_M_S,
+                    config.LANDING_MAX_VEL_M_S,
                 )
 
             centred = offset_m < config.CENTERED_M
@@ -426,9 +443,11 @@ async def execute_precision_landing(
             if within_cone:
                 if not descending:
                     logger.info(
-                        "[%s] inside the descent cone (%.2f m < %.2f m at %.1f m) "
-                        "- descending", drone_id, offset_m,
-                        descent_cone_limit_m(altitude_m), altitude_m,
+                        "[%s] inside the descent cone (%.2f m < %.2f m at %.1f m) - descending",
+                        drone_id,
+                        offset_m,
+                        descent_cone_limit_m(altitude_m),
+                        altitude_m,
                     )
                     descending = True
                 down_m_s = descent_rate_m_s(altitude_m)
@@ -436,18 +455,18 @@ async def execute_precision_landing(
                 if descending:
                     logger.warning(
                         "[%s] drifted outside the cone (%.2f m > %.2f m at %.1f m) "
-                        "- climbing to re-centre", drone_id, offset_m,
-                        descent_cone_limit_m(altitude_m), altitude_m,
+                        "- climbing to re-centre",
+                        drone_id,
+                        offset_m,
+                        descent_cone_limit_m(altitude_m),
+                        altitude_m,
                     )
                     descending = False
                 down_m_s = -config.CLIMB_RECENTER_VZ_M_S
 
-            publisher.command_body_horizontal(
-                forward_cmd, right_cmd, down_m_s, heading_deg
-            )
+            publisher.command_body_horizontal(forward_cmd, right_cmd, down_m_s, heading_deg)
             drone_state["status"] = (
-                f"landing on {expected_marker_id}: {offset_m:.2f} m off, "
-                f"{altitude_m:.1f} m up"
+                f"landing on {expected_marker_id}: {offset_m:.2f} m off, {altitude_m:.1f} m up"
             )
 
             # ── Touchdown ───────────────────────────────────────────────────
@@ -461,7 +480,8 @@ async def execute_precision_landing(
                 # Not actually down: keep going rather than declaring success.
                 logger.warning(
                     "[%s] touchdown signalled but the drone did not disarm - "
-                    "continuing the descent", drone_id,
+                    "continuing the descent",
+                    drone_id,
                 )
 
             # ── Stall watchdog ──────────────────────────────────────────────
@@ -471,7 +491,10 @@ async def execute_precision_landing(
                     logger.error(
                         "[%s] marker held but only %.2f m descended in 5 s at "
                         "%.1f m - aborting this attempt rather than hovering "
-                        "until the timeout.", drone_id, descended_m, altitude_m,
+                        "until the timeout.",
+                        drone_id,
+                        descended_m,
+                        altitude_m,
                     )
                     publisher.hold(heading_deg)
                     if fsm is not None:
@@ -488,7 +511,9 @@ async def execute_precision_landing(
                 offset_filter.reset()
                 logger.warning(
                     "[%s] lost marker %d at %.1f m - resuming search",
-                    drone_id, expected_marker_id, altitude_m,
+                    drone_id,
+                    expected_marker_id,
+                    altitude_m,
                 )
                 if fsm is not None:
                     fsm.fire("lock_lost")
@@ -496,38 +521,37 @@ async def execute_precision_landing(
             if waypoint_index >= len(waypoints):
                 logger.error(
                     "[%s] spiral exhausted (%d waypoints) without seeing marker %d",
-                    drone_id, len(waypoints), expected_marker_id,
+                    drone_id,
+                    len(waypoints),
+                    expected_marker_id,
                 )
                 publisher.hold(heading_deg)
-                publisher.setpoint.down_m_s = altitude_correction(
-                    altitude_m, search_alt_m
-                )
+                publisher.setpoint.down_m_s = altitude_correction(altitude_m, search_alt_m)
                 if fsm is not None:
                     fsm.fire("search_exhausted")
                 return LandingOutcome.SEARCH_EXHAUSTED
 
             wp_lat, wp_lon = waypoints[waypoint_index]
-            distance_m = geo.get_distance_m(
-                drone_state["lat"], drone_state["lon"], wp_lat, wp_lon
-            )
+            distance_m = geo.get_distance_m(drone_state["lat"], drone_state["lon"], wp_lat, wp_lon)
 
             if distance_m < 1.0:
                 waypoint_index += 1
                 if waypoint_index % 10 == 0:
                     logger.info(
                         "[%s] search waypoint %d/%d",
-                        drone_id, waypoint_index, len(waypoints),
+                        drone_id,
+                        waypoint_index,
+                        len(waypoints),
                     )
             else:
-                bearing = geo.get_bearing(
-                    drone_state["lat"], drone_state["lon"], wp_lat, wp_lon
-                )
+                bearing = geo.get_bearing(drone_state["lat"], drone_state["lon"], wp_lat, wp_lon)
                 north, east = geo.bearing_to_ned(bearing, config.SEARCH_SPEED_M_S)
                 # ALTITUDE IS HELD. The old search sent vz=0 with no correction,
                 # so the drone drifted vertically for the entire pattern -- and
                 # marker decodability depends directly on altitude.
                 publisher.command_ned(
-                    north, east,
+                    north,
+                    east,
                     altitude_correction(altitude_m, search_alt_m),
                     bearing,
                 )
@@ -561,9 +585,7 @@ async def _confirm_landed(drone, drone_id: str, timeout_s: float = 12.0) -> bool
     try:
         disarmed = await asyncio.wait_for(_wait_disarmed(), timeout=timeout_s)
     except asyncio.TimeoutError:
-        logger.warning(
-            "[%s] still armed %.0f s after the land command", drone_id, timeout_s
-        )
+        logger.warning("[%s] still armed %.0f s after the land command", drone_id, timeout_s)
         return False
 
     if disarmed:

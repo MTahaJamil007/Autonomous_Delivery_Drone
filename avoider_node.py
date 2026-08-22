@@ -76,6 +76,7 @@ ESCALATE = "ESCALATE"
 #  PURE DECISION FUNCTION
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def decide_action(
     eff_front,
     med_left,
@@ -84,10 +85,10 @@ def decide_action(
     dodge_dir,
     dodge_start_t,
     clear_first_seen,
-    SAFE_DIST,          # noqa: N803 - signature frozen by tests/test_avoider_node.py
-    CLEAR_DIST,         # noqa: N803
-    CLEAR_CONFIRM_S,    # noqa: N803
-    MIN_LOCK_S,         # noqa: N803
+    SAFE_DIST,  # noqa: N803 - signature frozen by tests/test_avoider_node.py
+    CLEAR_DIST,  # noqa: N803
+    CLEAR_CONFIRM_S,  # noqa: N803
+    MIN_LOCK_S,  # noqa: N803
     ESCALATION_LOCK_S,  # noqa: N803
 ):
     """Decide the avoidance action for one scan. Pure: no I/O, no clock read.
@@ -127,7 +128,7 @@ def decide_action(
     """
     # ── Obstacle ahead ───────────────────────────────────────────────────────
     if eff_front < SAFE_DIST:
-        clear_first_seen = 0.0          # any clear progress is invalidated
+        clear_first_seen = 0.0  # any clear progress is invalidated
 
         if dodge_dir is None:
             # First detection: commit to the side with more room, and stay
@@ -177,6 +178,7 @@ def decide_action(
 # ═════════════════════════════════════════════════════════════════════════════
 #  SCAN PROCESSING
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def clean_range(value: float) -> float:
     """Map one raw return to a usable distance.
@@ -244,16 +246,25 @@ def summarize_scan(
     the MIN_VALID_RANGE_M mask handles the noise the raw minimum would import.
     """
     front = sector_ranges(
-        ranges, angle_min_rad, angle_increment_rad,
-        -config.FRONT_HALF_DEG, config.FRONT_HALF_DEG,
+        ranges,
+        angle_min_rad,
+        angle_increment_rad,
+        -config.FRONT_HALF_DEG,
+        config.FRONT_HALF_DEG,
     )
     left = sector_ranges(
-        ranges, angle_min_rad, angle_increment_rad,
-        config.SIDE_START_DEG, config.SIDE_END_DEG,
+        ranges,
+        angle_min_rad,
+        angle_increment_rad,
+        config.SIDE_START_DEG,
+        config.SIDE_END_DEG,
     )
     right = sector_ranges(
-        ranges, angle_min_rad, angle_increment_rad,
-        -config.SIDE_END_DEG, -config.SIDE_START_DEG,
+        ranges,
+        angle_min_rad,
+        angle_increment_rad,
+        -config.SIDE_END_DEG,
+        -config.SIDE_START_DEG,
     )
 
     if not front:
@@ -282,33 +293,35 @@ def validate_scan_geometry(
 
     if sample_count != config.LIDAR_SAMPLES:
         problems.append(
-            f"sample count {sample_count} != config.LIDAR_SAMPLES {config.LIDAR_SAMPLES}")
+            f"sample count {sample_count} != config.LIDAR_SAMPLES {config.LIDAR_SAMPLES}"
+        )
 
     if not math.isclose(angle_min_rad, config.LIDAR_ANGLE_MIN_RAD, abs_tol=1e-3):
         problems.append(
             f"angle_min {angle_min_rad:.5f} != config.LIDAR_ANGLE_MIN_RAD "
-            f"{config.LIDAR_ANGLE_MIN_RAD:.5f}")
+            f"{config.LIDAR_ANGLE_MIN_RAD:.5f}"
+        )
 
     expected_increment = (
-        (config.LIDAR_ANGLE_MAX_RAD - config.LIDAR_ANGLE_MIN_RAD) / config.LIDAR_SAMPLES
-    )
+        config.LIDAR_ANGLE_MAX_RAD - config.LIDAR_ANGLE_MIN_RAD
+    ) / config.LIDAR_SAMPLES
     if not math.isclose(angle_increment_rad, expected_increment, rel_tol=2e-2):
         problems.append(
-            f"angle_increment {angle_increment_rad:.5f} != expected "
-            f"{expected_increment:.5f}")
+            f"angle_increment {angle_increment_rad:.5f} != expected {expected_increment:.5f}"
+        )
 
-    if range_max_m > 0 and not math.isclose(
-        range_max_m, config.LIDAR_RANGE_MAX_M, rel_tol=1e-2
-    ):
+    if range_max_m > 0 and not math.isclose(range_max_m, config.LIDAR_RANGE_MAX_M, rel_tol=1e-2):
         problems.append(
             f"range_max {range_max_m:.2f} != config.LIDAR_RANGE_MAX_M "
-            f"{config.LIDAR_RANGE_MAX_M:.2f}")
+            f"{config.LIDAR_RANGE_MAX_M:.2f}"
+        )
 
     if config.INF_REPLACE_M <= config.CLEAR_DIST:
         problems.append(
             f"config.INF_REPLACE_M ({config.INF_REPLACE_M}) must exceed "
             f"config.CLEAR_DIST ({config.CLEAR_DIST}) or an empty world never "
-            f"reads as clear")
+            f"reads as clear"
+        )
 
     return problems
 
@@ -316,6 +329,7 @@ def validate_scan_geometry(
 # ═════════════════════════════════════════════════════════════════════════════
 #  ROS NODE
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def build_node_class():
     """Define the ROS node lazily so this module imports without rclpy.
@@ -386,18 +400,22 @@ def build_node_class():
                 list(msg.ranges), msg.angle_min, msg.angle_increment
             )
 
-            action, self._dodge_dir, self._dodge_start_t, self._clear_first_seen = (
-                decide_action(
-                    eff_front, med_left, med_right, now,
-                    self._dodge_dir, self._dodge_start_t, self._clear_first_seen,
-                    config.SAFE_DIST, config.CLEAR_DIST, config.CLEAR_CONFIRM_S,
-                    config.MIN_LOCK_S, config.ESCALATION_LOCK_S,
-                )
+            action, self._dodge_dir, self._dodge_start_t, self._clear_first_seen = decide_action(
+                eff_front,
+                med_left,
+                med_right,
+                now,
+                self._dodge_dir,
+                self._dodge_start_t,
+                self._clear_first_seen,
+                config.SAFE_DIST,
+                config.CLEAR_DIST,
+                config.CLEAR_CONFIRM_S,
+                config.MIN_LOCK_S,
+                config.ESCALATION_LOCK_S,
             )
 
-            dodge_age_s = (
-                now - self._dodge_start_t if self._dodge_dir is not None else 0.0
-            )
+            dodge_age_s = now - self._dodge_start_t if self._dodge_dir is not None else 0.0
 
             self._seq += 1
             payload = {
@@ -422,8 +440,10 @@ def build_node_class():
             # events that matter -- and with three drones it is unreadable.
             if action != self._last_action:
                 level = (
-                    self.get_logger().error if action == ESCALATE
-                    else self.get_logger().warning if action != CLEAR
+                    self.get_logger().error
+                    if action == ESCALATE
+                    else self.get_logger().warning
+                    if action != CLEAR
                     else self.get_logger().info
                 )
                 level(
@@ -445,18 +465,22 @@ def main(argv: list[str] | None = None) -> int:
         description="LiDAR reactive avoidance for one drone.",
     )
     parser.add_argument(
-        "--drone-id", default="drone-0",
+        "--drone-id",
+        default="drone-0",
         help="Which drone this instance serves (default: drone-0). Determines "
-             "the UDP port and, unless overridden, the scan topic.",
+        "the UDP port and, unless overridden, the scan topic.",
     )
     parser.add_argument(
-        "--scan-topic", default=None,
+        "--scan-topic",
+        default=None,
         help="ROS LaserScan topic. Default: derived from --drone-id via "
-             "sim_topics.ros_scan_topic().",
+        "sim_topics.ros_scan_topic().",
     )
     parser.add_argument("--udp-host", default="127.0.0.1")
     parser.add_argument(
-        "--udp-port", type=int, default=None,
+        "--udp-port",
+        type=int,
+        default=None,
         help="Default: config.lidar_port(drone_id).",
     )
     parser.add_argument("--log-level", default="INFO")

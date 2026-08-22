@@ -71,11 +71,18 @@ async def _call_service(
         )
 
     argv = [
-        GZ_BINARY, "service", "-s", service,
-        "--reqtype", req_type,
-        "--reptype", rep_type,
-        "--timeout", str(int(timeout_s * 1000)),
-        "--req", request,
+        GZ_BINARY,
+        "service",
+        "-s",
+        service,
+        "--reqtype",
+        req_type,
+        "--reptype",
+        rep_type,
+        "--timeout",
+        str(int(timeout_s * 1000)),
+        "--req",
+        request,
     ]
 
     try:
@@ -89,9 +96,7 @@ async def _call_service(
         return False
 
     try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(), timeout=timeout_s + 2.0
-        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_s + 2.0)
     except asyncio.TimeoutError:
         # Kill rather than leak: an abandoned `gz` process holds a transport
         # connection and, at 10 Hz, would accumulate hundreds of them.
@@ -103,7 +108,8 @@ async def _call_service(
     if process.returncode != 0:
         logger.warning(
             "gz service %s failed (rc=%s): %s",
-            service, process.returncode,
+            service,
+            process.returncode,
             (stderr or b"").decode(errors="replace").strip()[:200],
         )
         return False
@@ -145,12 +151,18 @@ async def spawn_model(
     )
     ok = await _call_service(
         f"/world/{world}/create",
-        "gz.msgs.EntityFactory", "gz.msgs.Boolean", request,
+        "gz.msgs.EntityFactory",
+        "gz.msgs.Boolean",
+        request,
     )
     if ok:
         logger.info(
             "spawned %s as '%s' at E=%.2f N=%.2f U=%.2f",
-            sdf_uri, name, x_east_m, y_north_m, z_up_m,
+            sdf_uri,
+            name,
+            x_east_m,
+            y_north_m,
+            z_up_m,
         )
     return ok
 
@@ -170,12 +182,13 @@ async def set_model_pose(
     seconds would queue up behind itself.
     """
     request = (
-        f'name: "{name}", '
-        f"position: {{x: {x_east_m:.4f}, y: {y_north_m:.4f}, z: {z_up_m:.4f}}}"
+        f'name: "{name}", position: {{x: {x_east_m:.4f}, y: {y_north_m:.4f}, z: {z_up_m:.4f}}}'
     )
     return await _call_service(
         f"/world/{world}/set_pose",
-        "gz.msgs.Pose", "gz.msgs.Boolean", request,
+        "gz.msgs.Pose",
+        "gz.msgs.Boolean",
+        request,
         timeout_s=timeout_s,
     )
 
@@ -184,7 +197,8 @@ async def remove_model(name: str, world: str = config.GZ_WORLD) -> bool:
     """Remove a model. Lets a re-dispatch spawn pads under the same names."""
     return await _call_service(
         f"/world/{world}/remove",
-        "gz.msgs.Entity", "gz.msgs.Boolean",
+        "gz.msgs.Entity",
+        "gz.msgs.Boolean",
         f'name: "{name}", type: MODEL',
     )
 

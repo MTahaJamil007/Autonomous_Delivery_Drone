@@ -72,9 +72,10 @@ class SafetySupervisor:
         self._lidar_stale_warned = False
 
         logger.info(
-            "[%s] supervisor armed: geofence %.0f m, heartbeat %.1f s, "
-            "battery critical below %d%%",
-            drone_id, geofence_radius_m, heartbeat_timeout_s,
+            "[%s] supervisor armed: geofence %.0f m, heartbeat %.1f s, battery critical below %d%%",
+            drone_id,
+            geofence_radius_m,
+            heartbeat_timeout_s,
             config.BATTERY_CRITICAL_PCT,
         )
 
@@ -137,7 +138,8 @@ class SafetySupervisor:
                 # A supervisor that dies on an unexpected error is worse than one
                 # that logs and keeps checking.
                 logger.error(
-                    "[%s] supervisor check raised; continuing", self._drone_id,
+                    "[%s] supervisor check raised; continuing",
+                    self._drone_id,
                     exc_info=True,
                 )
                 await asyncio.sleep(interval_s)
@@ -153,40 +155,37 @@ class SafetySupervisor:
         emergency RTL on a drone that is sitting safely on the ground waiting to
         arm.
         """
-        if not udp_receiver.has_ever_arrived(
-            self._drone_state, udp_receiver.TELEMETRY_TS_KEY
-        ):
+        if not udp_receiver.has_ever_arrived(self._drone_state, udp_receiver.TELEMETRY_TS_KEY):
             return False
 
-        age_s = udp_receiver.age_s(
-            self._drone_state, udp_receiver.TELEMETRY_TS_KEY, now=now
-        )
+        age_s = udp_receiver.age_s(self._drone_state, udp_receiver.TELEMETRY_TS_KEY, now=now)
         if age_s > self._heartbeat_timeout_s:
             logger.critical(
                 "[%s] TELEMETRY LOST: no update for %.1f s (limit %.1f s)",
-                self._drone_id, age_s, self._heartbeat_timeout_s,
+                self._drone_id,
+                age_s,
+                self._heartbeat_timeout_s,
             )
-            await self._trigger_emergency_rtl(
-                f"Telemetry lost for {age_s:.1f}s"
-            )
+            await self._trigger_emergency_rtl(f"Telemetry lost for {age_s:.1f}s")
             return True
         return False
 
     async def _check_geofence(self) -> bool:
         """Distance from home against the soft fence."""
         distance_m = geo.get_distance_m(
-            self._home_lat, self._home_lon,
+            self._home_lat,
+            self._home_lon,
             self._drone_state.get("lat", self._home_lat),
             self._drone_state.get("lon", self._home_lon),
         )
         if distance_m > self._geofence_radius_m:
             logger.critical(
                 "[%s] GEOFENCE BREACH: %.0f m from home (limit %.0f m)",
-                self._drone_id, distance_m, self._geofence_radius_m,
+                self._drone_id,
+                distance_m,
+                self._geofence_radius_m,
             )
-            await self._trigger_emergency_rtl(
-                f"Geofence breach at {distance_m:.0f}m from home"
-            )
+            await self._trigger_emergency_rtl(f"Geofence breach at {distance_m:.0f}m from home")
             return True
         return False
 
@@ -215,11 +214,11 @@ class SafetySupervisor:
         if battery_pct < config.BATTERY_CRITICAL_PCT:
             logger.critical(
                 "[%s] CRITICAL BATTERY: %.1f%% (limit %d%%)",
-                self._drone_id, battery_pct, config.BATTERY_CRITICAL_PCT,
+                self._drone_id,
+                battery_pct,
+                config.BATTERY_CRITICAL_PCT,
             )
-            await self._trigger_emergency_land(
-                f"Critical battery at {battery_pct:.1f}%"
-            )
+            await self._trigger_emergency_land(f"Critical battery at {battery_pct:.1f}%")
             return True
 
         warn_at = config.BATTERY_CRITICAL_PCT + config.BATTERY_RESERVE_MARGIN_PCT
@@ -228,7 +227,9 @@ class SafetySupervisor:
             logger.warning(
                 "[%s] battery %.1f%% - below the %d%% reserve margin; the next "
                 "leg's pre-flight gate will likely refuse",
-                self._drone_id, battery_pct, warn_at,
+                self._drone_id,
+                battery_pct,
+                warn_at,
             )
         return False
 
@@ -243,14 +244,10 @@ class SafetySupervisor:
         if self._lidar_data is None:
             return
 
-        if not udp_receiver.has_ever_arrived(
-            self._lidar_data, udp_receiver.LIDAR_TS_KEY
-        ):
+        if not udp_receiver.has_ever_arrived(self._lidar_data, udp_receiver.LIDAR_TS_KEY):
             return
 
-        age_s = udp_receiver.age_s(
-            self._lidar_data, udp_receiver.LIDAR_TS_KEY, now=now
-        )
+        age_s = udp_receiver.age_s(self._lidar_data, udp_receiver.LIDAR_TS_KEY, now=now)
         stale = age_s > 2.0 * config.STALE_SENSOR_TIMEOUT_S
 
         if stale and not self._lidar_stale_warned:
@@ -259,7 +256,8 @@ class SafetySupervisor:
                 "[%s] obstacle feed stale for %.1f s. Navigation is holding "
                 "position. Check avoider_node.py and ros_gz_bridge for this "
                 "drone (see RUN_GUIDE.md).",
-                self._drone_id, age_s,
+                self._drone_id,
+                age_s,
             )
         elif not stale and self._lidar_stale_warned:
             self._lidar_stale_warned = False
@@ -286,7 +284,8 @@ class SafetySupervisor:
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "[%s] RTL command REJECTED (%s) - falling back to landing here",
-                self._drone_id, exc,
+                self._drone_id,
+                exc,
             )
             # force=True is what makes this fallback reachable at all.
             await self._trigger_emergency_land(f"RTL failed: {reason}", force=True)
@@ -319,7 +318,8 @@ class SafetySupervisor:
                 "[%s] LAND COMMAND ALSO REJECTED (%s). The autopilot is not "
                 "accepting commands. PX4's own failsafes and the uploaded "
                 "geofence are now the only remaining protection.",
-                self._drone_id, exc,
+                self._drone_id,
+                exc,
             )
             self._emergency_triggered = True
             self._emergency_reason = f"{reason} (land also rejected)"

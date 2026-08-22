@@ -72,10 +72,9 @@ def get_bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     d_lon_rad = math.radians(lon2 - lon1)
 
     x = math.sin(d_lon_rad) * math.cos(lat2_rad)
-    y = (
-        math.cos(lat1_rad) * math.sin(lat2_rad)
-        - math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(d_lon_rad)
-    )
+    y = math.cos(lat1_rad) * math.sin(lat2_rad) - math.sin(lat1_rad) * math.cos(
+        lat2_rad
+    ) * math.cos(d_lon_rad)
     return (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
 
 
@@ -171,9 +170,7 @@ def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def slew_limit(
-    current: float, target: float, max_delta_per_s: float, dt_s: float
-) -> float:
+def slew_limit(current: float, target: float, max_delta_per_s: float, dt_s: float) -> float:
     """Move `current` toward `target`, capped at `max_delta_per_s * dt_s`.
 
     This replaces the fixed-tick-count velocity blend the navigation loop used

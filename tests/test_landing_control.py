@@ -7,19 +7,18 @@ enough to decode at the altitude it is searched from (F3), a decodable pad (F1),
 and a descent that cannot proceed while badly off-centre.
 """
 
-from pathlib import Path
-
 import math
+from pathlib import Path
 
 import pytest
 
 import config
 from drone_agent import landing
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 #  F4: altitude-invariant control
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_effective_loop_gain_is_altitude_invariant():
     """THE F4 FIX, stated as a test.
@@ -32,7 +31,7 @@ def test_effective_loop_gain_is_altitude_invariant():
 
     Converting to metres first makes the gain a property of the controller.
     """
-    ground_offset_m = 0.5             # the same real error at every altitude
+    ground_offset_m = 0.5  # the same real error at every altitude
 
     commands = []
     for altitude_m in (10.0, 5.0, 3.0, 1.0, 0.5):
@@ -45,15 +44,12 @@ def test_effective_loop_gain_is_altitude_invariant():
         commands.append(config.LANDING_K_P * recovered_m)
 
     assert max(commands) - min(commands) < 1e-6, (
-        f"the command for a fixed ground offset must not depend on altitude, "
-        f"got {commands}"
+        f"the command for a fixed ground offset must not depend on altitude, got {commands}"
     )
 
     # And demonstrate the failure it replaces.
     old_gain = 0.015
-    old_effective = [
-        old_gain * config.CAMERA_FX_PX / h for h in (10.0, 1.0)
-    ]
+    old_effective = [old_gain * config.CAMERA_FX_PX / h for h in (10.0, 1.0)]
     assert old_effective[1] / old_effective[0] == pytest.approx(10.0, rel=1e-6), (
         "the old controller's gain really did rise 10x on the way down"
     )
@@ -90,22 +86,19 @@ def test_body_frame_signs_match_the_derived_camera_mount():
     altitude_m = 5.0
 
     # Marker below image centre (positive err_y) -> it is behind us -> fly back.
-    forward_m, right_m = landing.metric_offsets(
-        {"err_x": 0.0, "err_y": 50.0}, altitude_m
-    )
+    forward_m, right_m = landing.metric_offsets({"err_x": 0.0, "err_y": 50.0}, altitude_m)
     assert forward_m < 0, "a marker below centre must command backward motion"
     assert right_m == pytest.approx(0.0)
 
     # Marker right of centre (positive err_x) -> it is to our right -> fly right.
-    forward_m, right_m = landing.metric_offsets(
-        {"err_x": 50.0, "err_y": 0.0}, altitude_m
-    )
+    forward_m, right_m = landing.metric_offsets({"err_x": 50.0, "err_y": 0.0}, altitude_m)
     assert right_m > 0, "a marker right of centre must command rightward motion"
     assert forward_m == pytest.approx(0.0)
 
     # Magnitudes are symmetric.
-    assert abs(landing.metric_offsets({"err_x": 0, "err_y": -50.0}, altitude_m)[0]) == \
-        pytest.approx(abs(forward_m) if forward_m else 50.0 * altitude_m / config.CAMERA_FX_PX)
+    assert abs(
+        landing.metric_offsets({"err_x": 0, "err_y": -50.0}, altitude_m)[0]
+    ) == pytest.approx(abs(forward_m) if forward_m else 50.0 * altitude_m / config.CAMERA_FX_PX)
 
 
 def test_ema_filters_the_measurement_not_the_command():
@@ -115,10 +108,9 @@ def test_ema_filters_the_measurement_not_the_command():
     filtered = [ema.update(sample)[0] for sample in noisy]
 
     raw_variance = sum(x[0] ** 2 for x in noisy[-20:]) / 20
-    filtered_variance = sum(x ** 2 for x in filtered[-20:]) / 20
+    filtered_variance = sum(x**2 for x in filtered[-20:]) / 20
     assert filtered_variance < raw_variance * 0.5, (
-        f"the filter must materially reduce variance: {raw_variance:.3f} -> "
-        f"{filtered_variance:.3f}"
+        f"the filter must materially reduce variance: {raw_variance:.3f} -> {filtered_variance:.3f}"
     )
 
 
@@ -133,6 +125,7 @@ def test_ema_reset_discards_a_stale_lock():
 # ─────────────────────────────────────────────────────────────────────────────
 #  F3: the marker/altitude budget
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_the_pad_is_decodable_at_the_altitude_it_is_searched_from():
     """F3: a 0.5 m pad spans 14 px at cruise altitude and cannot be decoded.
@@ -157,8 +150,9 @@ def test_the_pad_is_decodable_at_the_altitude_it_is_searched_from():
 
     # And each lever alone would be marginal - which is why both are used.
     assert config.marker_px_at_altitude(config.TARGET_ALT_M) >= config.MARKER_MIN_DECODE_PX
-    assert config.marker_px_at_altitude(config.SEARCH_ALT_M, 0.5) < \
-        config.MARKER_MIN_DECODE_PX * 1.2
+    assert (
+        config.marker_px_at_altitude(config.SEARCH_ALT_M, 0.5) < config.MARKER_MIN_DECODE_PX * 1.2
+    )
 
 
 def test_search_altitude_is_below_cruise_so_a_descent_actually_happens():
@@ -197,15 +191,10 @@ def test_the_model_declares_no_absolute_sensor_topic():
     import xml.etree.ElementTree as ElementTree
 
     project_root = Path(__file__).resolve().parents[1]
-    tree = ElementTree.parse(
-        project_root / "sim" / "models" / "x500_delivery" / "model.sdf"
-    )
+    tree = ElementTree.parse(project_root / "sim" / "models" / "x500_delivery" / "model.sdf")
 
     sensors = tree.iter("sensor")
-    named = [
-        (sensor.get("name"), sensor.find("topic"))
-        for sensor in sensors
-    ]
+    named = [(sensor.get("name"), sensor.find("topic")) for sensor in sensors]
     assert named, "the model must declare sensors at all"
 
     offenders = [name for name, topic in named if topic is not None]
@@ -219,6 +208,7 @@ def test_the_model_declares_no_absolute_sensor_topic():
 # ─────────────────────────────────────────────────────────────────────────────
 #  P4.2: descent gating
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_the_descent_cone_narrows_with_altitude():
     """A lateral error tolerable at 8 m is a miss at 0 m.
@@ -236,13 +226,12 @@ def test_being_outside_the_cone_blocks_the_descent():
     """The gate must actually exclude a real off-centre case."""
     altitude_m = 2.0
     limit_m = landing.descent_cone_limit_m(altitude_m)
-    assert 0.5 * limit_m < limit_m          # inside
-    assert 2.0 * limit_m > limit_m          # outside
+    assert 0.5 * limit_m < limit_m  # inside
+    assert 2.0 * limit_m > limit_m  # outside
 
     # A 1 m offset at 2 m altitude must be outside the gate.
     assert 1.0 > limit_m, (
-        f"1 m off-centre at 2 m altitude must block the descent "
-        f"(limit {limit_m:.2f} m)"
+        f"1 m off-centre at 2 m altitude must block the descent (limit {limit_m:.2f} m)"
     )
 
 
@@ -257,6 +246,7 @@ def test_descent_rate_slows_toward_touchdown():
 # ─────────────────────────────────────────────────────────────────────────────
 #  P4.4: touchdown detection
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_touchdown_prefers_the_autopilots_landed_state():
     """LandedState fuses altitude, vertical velocity and thrust."""
@@ -276,6 +266,7 @@ def test_touchdown_falls_back_to_altitude_when_landed_state_is_absent():
 # ─────────────────────────────────────────────────────────────────────────────
 #  P4.5: the search pattern
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_spiral_rings_overlap_the_camera_footprint():
     """Ring spacing above the footprint stripes and leaves gaps the pad sits in."""
@@ -314,9 +305,7 @@ def test_the_search_timeout_is_hard_capped():
     the return leg needs.
     """
     # A deliberately huge pattern, to prove the cap binds.
-    huge = landing.generate_spiral_waypoints(
-        30.0315, 72.3140, altitude_m=1.0, max_radius_m=200.0
-    )
+    huge = landing.generate_spiral_waypoints(30.0315, 72.3140, altitude_m=1.0, max_radius_m=200.0)
     assert len(huge) > 100
     assert landing.search_timeout_s(huge) == config.LANDING_TIMEOUT_MAX_S
     assert config.LANDING_TIMEOUT_MAX_S <= 240
@@ -335,13 +324,13 @@ def test_search_holds_altitude_rather_than_drifting():
     # Above it -> descend.
     assert altitude_correction(8.0, config.SEARCH_ALT_M) > 0
     # At it -> no correction.
-    assert altitude_correction(config.SEARCH_ALT_M, config.SEARCH_ALT_M) == \
-        pytest.approx(0.0)
+    assert altitude_correction(config.SEARCH_ALT_M, config.SEARCH_ALT_M) == pytest.approx(0.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  disambiguation
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_select_target_never_returns_the_wrong_marker():
     """Three pads within 15 m of each other, all in frame at once."""

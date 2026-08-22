@@ -119,8 +119,7 @@ class MissionFSM:
     turn a controlled shutdown into an exception on the flight path.
     """
 
-    def __init__(self, initial_state: MissionState = MissionState.IDLE,
-                 label: str = ""):
+    def __init__(self, initial_state: MissionState = MissionState.IDLE, label: str = ""):
         self._state = initial_state
         self._label = label
         self._on_enter: dict[MissionState, list[Callable]] = {}
@@ -147,14 +146,19 @@ class MissionFSM:
         if next_state is None:
             logger.warning(
                 "%sevent '%s' is not valid in %s (valid: %s)",
-                self._prefix, event, self._state.value,
+                self._prefix,
+                event,
+                self._state.value,
                 ", ".join(sorted(available)) or "none - terminal state",
             )
             return False
 
         logger.info(
             "%s%s --[%s]--> %s",
-            self._prefix, self._state.value, event, next_state.value,
+            self._prefix,
+            self._state.value,
+            event,
+            next_state.value,
         )
         self.history.append((self._state.value, event, next_state.value))
         self._state = next_state
@@ -171,7 +175,10 @@ class MissionFSM:
         """
         logger.critical(
             "%sFORCED %s -> %s: %s",
-            self._prefix, self._state.value, state.value, reason,
+            self._prefix,
+            self._state.value,
+            state.value,
+            reason,
         )
         self.history.append((self._state.value, f"force:{reason}", state.value))
         self._state = state
@@ -188,7 +195,9 @@ class MissionFSM:
             except Exception:  # noqa: BLE001 - a callback must not break a transition
                 logger.error(
                     "%son_enter callback for %s raised",
-                    self._prefix, state.value, exc_info=True,
+                    self._prefix,
+                    state.value,
+                    exc_info=True,
                 )
                 continue
 
@@ -202,7 +211,8 @@ class MissionFSM:
                     result.close()
                     logger.warning(
                         "%sasync on_enter callback for %s skipped: no event loop",
-                        self._prefix, state.value,
+                        self._prefix,
+                        state.value,
                     )
                     continue
                 # Hold the reference: an unreferenced task can be collected

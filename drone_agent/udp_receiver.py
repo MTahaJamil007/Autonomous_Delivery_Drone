@@ -51,7 +51,7 @@ import config
 logger = logging.getLogger(__name__)
 
 RECV_BUFFER_BYTES = 65535
-POLL_INTERVAL_S = 0.02          # 50 Hz: comfortably faster than either 10 Hz feed
+POLL_INTERVAL_S = 0.02  # 50 Hz: comfortably faster than either 10 Hz feed
 
 
 class UdpJsonReceiver:
@@ -153,7 +153,10 @@ class UdpJsonReceiver:
             loop_is_closing = loop.is_closed()
             logger.info(
                 "%s receiver stopped: %d messages, %d malformed, %d dropped%s",
-                self._name, self.messages, self.malformed, self.dropped,
+                self._name,
+                self.messages,
+                self.malformed,
+                self.dropped,
                 "" if not loop_is_closing else " (loop closing)",
             )
 
@@ -166,7 +169,10 @@ class UdpJsonReceiver:
             if self.malformed <= 5 or self.malformed % 100 == 0:
                 logger.warning(
                     "%s receiver: malformed datagram #%d (%s): %r",
-                    self._name, self.malformed, exc, data[:80],
+                    self._name,
+                    self.malformed,
+                    exc,
+                    data[:80],
                 )
             return
 

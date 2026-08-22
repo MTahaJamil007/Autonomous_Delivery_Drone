@@ -146,7 +146,10 @@ async def upsert_obstacle(
         now = utc_now_iso()
 
         for existing_id, existing_lat, existing_lon, existing_conf, existing_radius in candidates:
-            if geo.get_distance_m(lat, lon, existing_lat, existing_lon) > config.OBSTACLE_MERGE_RADIUS_M:
+            if (
+                geo.get_distance_m(lat, lon, existing_lat, existing_lon)
+                > config.OBSTACLE_MERGE_RADIUS_M
+            ):
                 continue
 
             new_confidence = merge_confidence(existing_conf, confidence)
@@ -172,9 +175,12 @@ async def upsert_obstacle(
             await db.commit()
 
             logger.info(
-                "merged obstacle %s at (%.6f, %.6f): confidence %.2f -> %.2f "
-                "(reported by %s)",
-                existing_id, new_lat, new_lon, existing_conf, new_confidence,
+                "merged obstacle %s at (%.6f, %.6f): confidence %.2f -> %.2f (reported by %s)",
+                existing_id,
+                new_lat,
+                new_lon,
+                existing_conf,
+                new_confidence,
                 source_drone or "unknown",
             )
             return existing_id
@@ -184,14 +190,18 @@ async def upsert_obstacle(
             "INSERT OR REPLACE INTO obstacles (id, lat, lon, radius_m, "
             "obstacle_type, confidence, source_drone, first_seen, last_confirmed) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (obstacle_id, lat, lon, radius_m, obstacle_type, confidence,
-             source_drone, now, now),
+            (obstacle_id, lat, lon, radius_m, obstacle_type, confidence, source_drone, now, now),
         )
         await db.commit()
 
         logger.info(
             "new obstacle %s at (%.6f, %.6f), r=%.1f m, confidence %.2f, from %s",
-            obstacle_id, lat, lon, radius_m, confidence, source_drone or "unknown",
+            obstacle_id,
+            lat,
+            lon,
+            radius_m,
+            confidence,
+            source_drone or "unknown",
         )
         return obstacle_id
 
@@ -230,7 +240,11 @@ async def query_bbox(
 
     logger.debug(
         "bbox query (%.4f,%.4f)-(%.4f,%.4f) returned %d obstacle(s)",
-        min_lat, min_lon, max_lat, max_lon, len(results),
+        min_lat,
+        min_lon,
+        max_lat,
+        max_lon,
+        len(results),
     )
     return results
 

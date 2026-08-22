@@ -124,11 +124,11 @@ class DeliveryJob:
 class LegOutcome:
     """What happened on one leg. Kept so a partial mission is still legible."""
 
-    role: str                     # 'pickup_pad' | 'drop_pad' | 'home_pad'
+    role: str  # 'pickup_pad' | 'drop_pad' | 'home_pad'
     marker_id: int
     arrived: bool = False
     landed: bool = False
-    payload_op_ok: bool | None = None   # None if the leg has no payload action
+    payload_op_ok: bool | None = None  # None if the leg has no payload action
     detours: int = 0
     detail: str = ""
 
@@ -148,17 +148,21 @@ class MissionResult:
     final_state: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def completed(cls, legs: list[LegOutcome], state: dict[str, Any] | None = None) -> MissionResult:
+    def completed(
+        cls, legs: list[LegOutcome], state: dict[str, Any] | None = None
+    ) -> MissionResult:
         return cls(JobStatus.COMPLETED, "All legs complete.", legs, state or {})
 
     @classmethod
-    def failed(cls, detail: str, legs: list[LegOutcome] | None = None,
-               state: dict[str, Any] | None = None) -> MissionResult:
+    def failed(
+        cls, detail: str, legs: list[LegOutcome] | None = None, state: dict[str, Any] | None = None
+    ) -> MissionResult:
         return cls(JobStatus.FAILED, detail, legs or [], state or {})
 
     @classmethod
-    def aborted(cls, detail: str, legs: list[LegOutcome] | None = None,
-                state: dict[str, Any] | None = None) -> MissionResult:
+    def aborted(
+        cls, detail: str, legs: list[LegOutcome] | None = None, state: dict[str, Any] | None = None
+    ) -> MissionResult:
         return cls(JobStatus.ABORTED, detail, legs or [], state or {})
 
     @property

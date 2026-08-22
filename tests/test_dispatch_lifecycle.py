@@ -9,10 +9,9 @@ Each test uses its own temporary database file, so they neither depend on nor
 disturb the developer's fleet.db.
 """
 
-from pathlib import Path
-
 import asyncio
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -49,9 +48,7 @@ async def test_atomic_claim_prevents_double_assignment(fleet_db):
     )
 
     winners = [c for c in (claim_a, claim_b) if c is not None]
-    assert len(winners) == 1, (
-        f"exactly one claim must succeed for a 1-drone fleet, got {winners}"
-    )
+    assert len(winners) == 1, f"exactly one claim must succeed for a 1-drone fleet, got {winners}"
 
     jobs = {j["id"]: j for j in await fleet_db.get_all_jobs()}
     statuses = sorted(j["status"] for j in jobs.values())
@@ -130,9 +127,7 @@ async def test_no_drone_is_stranded_by_repeated_failures(fleet_db):
         job = await fleet_db.create_job(30.03, 72.31, 30.04, 72.32)
         drone_id = await fleet_db.claim_drone_for_job(job.job_id)
         assert drone_id is not None, f"fleet exhausted after {i} failed dispatches"
-        await fleet_db.finalize_job(
-            job.job_id, JobStatus.FAILED, f"simulated failure {i}"
-        )
+        await fleet_db.finalize_job(job.job_id, JobStatus.FAILED, f"simulated failure {i}")
 
     drones = await fleet_db.get_all_drones()
     stuck = [d for d in drones if d["status"] != DroneStatus.AVAILABLE.value]

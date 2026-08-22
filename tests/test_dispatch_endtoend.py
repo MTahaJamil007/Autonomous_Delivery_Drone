@@ -13,10 +13,9 @@ operator was told the job had been assigned.
 Marked `slow` because it waits out a real connection probe.
 """
 
-from pathlib import Path
-
 import asyncio
 import time
+from pathlib import Path
 
 import pytest
 
@@ -44,10 +43,15 @@ def client(tmp_path, monkeypatch):
 @pytest.mark.slow
 def test_dispatch_with_px4_offline_fails_and_frees_the_drone(client):
     """The whole P1 criterion, end to end over HTTP."""
-    response = client.post("/dispatch", json={
-        "pickup_lat": 30.0320, "pickup_lon": 72.3145,
-        "drop_lat": 30.0325, "drop_lon": 72.3150,
-    })
+    response = client.post(
+        "/dispatch",
+        json={
+            "pickup_lat": 30.0320,
+            "pickup_lon": 72.3145,
+            "drop_lat": 30.0325,
+            "drop_lon": 72.3150,
+        },
+    )
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "Success", f"expected assignment, got {body}"
@@ -61,7 +65,8 @@ def test_dispatch_with_px4_offline_fails_and_frees_the_drone(client):
     while time.monotonic() < deadline:
         job = client.get(f"/jobs/{job_id}").json()
         if job["status"] in (
-            JobStatus.FAILED.value, JobStatus.ABORTED.value,
+            JobStatus.FAILED.value,
+            JobStatus.ABORTED.value,
             JobStatus.COMPLETED.value,
         ):
             break
@@ -80,8 +85,7 @@ def test_dispatch_with_px4_offline_fails_and_frees_the_drone(client):
     fleet = client.get("/fleet/status").json()
     drone = next(d for d in fleet["drones"] if d["id"] == drone_id)
     assert drone["status"] == DroneStatus.AVAILABLE.value, (
-        "the drone must be returned to the pool; leaving it BUSY is the "
-        "original bug"
+        "the drone must be returned to the pool; leaving it BUSY is the original bug"
     )
     assert drone["current_job_id"] is None
     assert not drone["mission_live"]
@@ -99,8 +103,10 @@ def test_second_dispatch_queues_then_starts_automatically(client):
     jobs accumulated and were never dispatched.
     """
     payload = {
-        "pickup_lat": 30.0320, "pickup_lon": 72.3145,
-        "drop_lat": 30.0325, "drop_lon": 72.3150,
+        "pickup_lat": 30.0320,
+        "pickup_lon": 72.3145,
+        "drop_lat": 30.0325,
+        "drop_lon": 72.3150,
     }
     first = client.post("/dispatch", json=payload).json()
     second = client.post("/dispatch", json=payload).json()
@@ -115,13 +121,18 @@ def test_second_dispatch_queues_then_starts_automatically(client):
     deadline = time.monotonic() + 40.0
     while time.monotonic() < deadline:
         jobs = client.get("/jobs").json()["jobs"]
-        if all(
-            j["status"] in (
-                JobStatus.FAILED.value, JobStatus.ABORTED.value,
-                JobStatus.COMPLETED.value,
+        if (
+            all(
+                j["status"]
+                in (
+                    JobStatus.FAILED.value,
+                    JobStatus.ABORTED.value,
+                    JobStatus.COMPLETED.value,
+                )
+                for j in jobs
             )
-            for j in jobs
-        ) and len(jobs) == 2:
+            and len(jobs) == 2
+        ):
             break
         time.sleep(0.5)
 
@@ -135,17 +146,20 @@ def test_second_dispatch_queues_then_starts_automatically(client):
         assert job["detail"]
 
     fleet = client.get("/fleet/status").json()
-    assert all(
-        d["status"] == DroneStatus.AVAILABLE.value for d in fleet["drones"]
-    ), "no drone may be left BUSY once every job is terminal"
+    assert all(d["status"] == DroneStatus.AVAILABLE.value for d in fleet["drones"]), (
+        "no drone may be left BUSY once every job is terminal"
+    )
 
 
 def test_dispatch_rejects_impossible_coordinates(client):
     """Validation belongs at the boundary, not in the flight code."""
-    response = client.post("/dispatch", json={
-        "pickup_lat": 200.0, "pickup_lon": 72.3145,
-        "drop_lat": 30.0325, "drop_lon": 72.3150,
-    })
-    assert response.status_code == 422, (
-        "a latitude of 200 must be rejected by the request model"
+    response = client.post(
+        "/dispatch",
+        json={
+            "pickup_lat": 200.0,
+            "pickup_lon": 72.3145,
+            "drop_lat": 30.0325,
+            "drop_lon": 72.3150,
+        },
     )
+    assert response.status_code == 422, "a latitude of 200 must be rejected by the request model"
