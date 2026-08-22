@@ -13,7 +13,7 @@ Use this when:
 
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -62,7 +62,9 @@ def reset_fleet_database():
         print(f"   ✅ Deleted {deleted_jobs} jobs")
 
         # Step 2: Reset all drones to AVAILABLE
-        now = datetime.utcnow().isoformat()
+        # Timezone-aware: naive datetimes cannot be compared against the
+        # aware ones every other writer produces, and utcnow() is deprecated.
+        now = datetime.now(timezone.utc).isoformat()
         print("\n🔄 Resetting drones to AVAILABLE...")
         cursor.execute(
             """

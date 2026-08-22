@@ -9,14 +9,16 @@ import logging
 import math
 from typing import Any
 
+from drone_agent import geo
+
 logger = logging.getLogger(__name__)
 
 
-def get_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calculate flat-earth distance in meters."""
-    d_lat = (lat2 - lat1) * 111_320.0
-    d_lon = (lon2 - lon1) * (111_320.0 * math.cos(math.radians(lat1)))
-    return math.hypot(d_lat, d_lon)
+# Re-exported, not redefined. This was the seventh copy of the same formula.
+# The name stays importable from here because tests/test_detour.py and older
+# callers reach for it at this path, but there is now exactly one implementation
+# - so a correction to it cannot leave this module behind.
+get_distance_m = geo.get_distance_m
 
 
 def point_to_line_distance(

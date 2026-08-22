@@ -123,7 +123,9 @@ had, so a failure names the specific mistake.
 | `make no-shadowed-config` | A tunable re-declared outside `config.py`. Ten were shadowed in `drone_logic.py`, so editing `config.py` had no effect on flight. |
 | `make docs-check` | A reference to a `.md` file that does not exist. Seven pointed at a `HOW_TO_RUN` guide that never existed, two of them inside runtime error strings. |
 | `make schema-check` | Simulation assets drifting from `config.py` — camera intrinsics, pad size, world origin vs. map centre, and the marker/altitude budget. |
-| `make blocking-check` | `subprocess.run`, `cv2.imshow` or `time.sleep` on the flight path. Finding F5: these gap the setpoint stream and PX4 drops OFFBOARD. |
+| `make blocking-check` | `subprocess.run`, `cv2.imshow` or `time.sleep` on the flight path. Finding F5: these gap the setpoint stream and PX4 drops OFFBOARD. A per-line `# blocking-ok:` opt-out requires a written justification, rather than exempting a whole file. |
+| `scripts/repo_checks.py prints` | `print()` in flight code. `drone_logic.py` printed ~40 times from inside the flight loop; with three drones that output is unreadable and nothing is parseable after the fact. CLI entry points are exempt. |
+| `scripts/repo_checks.py duplicates` | A shared formula gaining a second definition. `get_distance_m` had **seven** copies. |
 
 ---
 

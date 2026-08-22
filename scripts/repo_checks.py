@@ -296,6 +296,117 @@ def check_blocking() -> list[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  print() in flight code
+# ─────────────────────────────────────────────────────────────────────────────
+
+# print() is fine in a CLI entry point - argparse-style startup errors on stderr
+# are clearer than a log line nobody has configured a handler for yet. It is not
+# fine anywhere the mission actually runs.
+PRINT_ALLOWED_FUNCTIONS = {"main", "_main", "run", "_show"}
+
+
+def check_prints() -> list[str]:
+    """No print() inside flight code's non-CLI functions.
+
+    drone_logic.py printed about 40 times from inside the flight loop. With one
+    drone that is merely untidy; with three it makes the output unreadable, and
+    nothing is machine-parseable after the fact - which is exactly when you need
+    it. Structured logging carries the drone id; print does not.
+    """
+    import ast
+
+    problems = []
+    flight_dirs = (
+        "drone_agent",
+        "perception",
+        "drone_web",
+        "fleet_dispatch",
+        "obstacle_memory_service",
+        "global_planner",
+    )
+
+    for path in source_files():
+        if path.suffix != ".py":
+            continue
+        relative = path.relative_to(PROJECT_ROOT).as_posix()
+        if not (relative.startswith(flight_dirs) or relative == "avoider_node.py"):
+            continue
+
+        tree = ast.parse(path.read_text())
+
+        # Map every node to the nearest enclosing function, so a print in a
+        # nested helper is attributed to the function that owns it.
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name in PRINT_ALLOWED_FUNCTIONS:
+                continue
+            for inner in ast.walk(node):
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "print"
+                ):
+                    problems.append(
+                        f"{relative}:{inner.lineno} print() in {node.name}() - "
+                        f"use the module logger so the drone id and level are "
+                        f"attached and the output is parseable after a flight"
+                    )
+    return problems
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  duplicated formulas
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Functions that must have exactly one definition, mapped to where it belongs.
+# Each of these had multiple identical copies. Six copies of a formula means a
+# correction to one leaves five wrong - and concretely, it meant the geofence
+# check and the detour planner could disagree about how far apart two points
+# were while both looked correct in isolation.
+SINGLE_DEFINITION = {
+    "get_distance_m": "drone_agent/geo.py",
+    "get_bearing": "drone_agent/geo.py",
+    "bearing_to_ned": "drone_agent/geo.py",
+}
+
+
+def check_single_definitions() -> list[str]:
+    """Shared formulas must be defined once, in their owning module."""
+    import ast
+
+    problems = []
+    locations: dict[str, list[str]] = {name: [] for name in SINGLE_DEFINITION}
+
+    for path in source_files():
+        if path.suffix != ".py":
+            continue
+        relative = path.relative_to(PROJECT_ROOT).as_posix()
+        if relative.startswith("tests/"):
+            continue
+
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name in locations:
+                    locations[node.name].append(f"{relative}:{node.lineno}")
+
+    for name, found in locations.items():
+        owner = SINGLE_DEFINITION[name]
+        if len(found) > 1:
+            problems.append(
+                f"{name}() is defined {len(found)} times ({', '.join(found)}); "
+                f"it belongs only in {owner}. Import it, or re-export the name."
+            )
+        elif found and not found[0].startswith(owner):
+            problems.append(f"{name}() is defined in {found[0]} but belongs in {owner}")
+        elif not found:
+            problems.append(f"{name}() is not defined anywhere; expected in {owner}")
+
+    return problems
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -304,6 +415,8 @@ CHECKS = {
     "schema": ("sim assets agree with config.py", check_schema),
     "tunables": ("config.py is the only source of tunables", check_tunables),
     "blocking": ("no blocking calls in the flight path", check_blocking),
+    "prints": ("no print() in flight code", check_prints),
+    "duplicates": ("shared formulas defined once", check_single_definitions),
 }
 
 

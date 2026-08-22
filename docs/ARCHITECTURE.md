@@ -291,11 +291,15 @@ running. Each deletion has a named survivor:
 | `RUN_SYSTEM.sh` | `scripts/run_system.sh` | Started one bridge and one avoider — a single-drone launcher |
 | `vision_bridge.py` (root) | `perception/vision_bridge.py` | `perception/` was an empty placeholder |
 
-Plus one consolidation: `get_distance_m` was defined **six times** with
+Plus one consolidation: `get_distance_m` was defined **seven times** with
 identical bodies (and `get_bearing` twice more). One copy now lives in
-`drone_agent/geo.py`. Six copies of a formula means a correction to one leaves
-five wrong — and it meant the geofence check and the detour planner could
-disagree about distance while both looked right in isolation.
+`drone_agent/geo.py`; `global_planner.detour` re-exports the name so existing
+callers and `tests/test_detour.py` still resolve it, but there is exactly one
+implementation. Seven copies of a formula means a correction to one leaves six
+wrong — and concretely, it meant the geofence check and the detour planner could
+disagree about how far apart two points were while both looked right in
+isolation. `scripts/repo_checks.py duplicates` now fails the build if a second
+definition appears.
 
 ---
 
