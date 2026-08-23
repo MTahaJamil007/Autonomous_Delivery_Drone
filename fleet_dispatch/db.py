@@ -67,11 +67,58 @@ async def _configure(db: aiosqlite.Connection) -> None:
     await db.execute("PRAGMA foreign_keys=ON")
 
 
+# Columns added to schema.sql after the first release, as
+# {table: {column: full column definition}}.
+#
+# WHY THIS TABLE EXISTS
+# ---------------------
+# schema.sql is all CREATE TABLE IF NOT EXISTS, which is a no-op against a
+# database whose tables already exist -- it can create a schema but it can never
+# widen one. So a fleet.db written before `detail` was added kept its old shape,
+# init_database() logged "fleet database ready", and the very next startup step
+# (recover_orphaned_jobs) died on `no such column: detail`, taking the whole
+# dispatcher down with it. The web UI simply refused to connect, several
+# processes away from the actual cause.
+#
+# Any future additive column must be listed here as well as in schema.sql.
+ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "drones": {"detail": "TEXT DEFAULT ''"},
+    "jobs": {"detail": "TEXT DEFAULT ''"},
+}
+
+
+async def _migrate(db: aiosqlite.Connection) -> list[str]:
+    """Add any column in ADDED_COLUMNS that this database is missing.
+
+    Idempotent: on an up-to-date database it reads two PRAGMAs and does nothing.
+    Only additive ALTERs live here -- anything needing a table rewrite is a
+    different problem and should not be hidden inside startup.
+    """
+    applied: list[str] = []
+
+    for table, columns in ADDED_COLUMNS.items():
+        cursor = await db.execute(f"PRAGMA table_info({table})")
+        existing = {row[1] for row in await cursor.fetchall()}
+        if not existing:
+            continue  # table was just created from schema.sql; already current
+
+        for column, definition in columns.items():
+            if column not in existing:
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                applied.append(f"{table}.{column}")
+
+    return applied
+
+
 async def init_database() -> None:
-    """Create the schema and register the configured fleet."""
+    """Create the schema, migrate an older one, and register the configured fleet."""
     async with _connect() as db:
         await _configure(db)
         await db.executescript(SCHEMA_PATH.read_text())
+
+        applied = await _migrate(db)
+        if applied:
+            logger.warning("migrated fleet database: added %s", ", ".join(applied))
 
         now = utc_now_iso()
         for drone_id in config.DRONE_IDS:

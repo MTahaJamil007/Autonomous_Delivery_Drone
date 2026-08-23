@@ -39,6 +39,22 @@ if [ ! -d "$PX4_DIR" ]; then
     return 1 2>/dev/null || exit 1
 fi
 
+# 0. Seed the two search paths we are about to extend.
+#
+# PX4's generated gz_env.sh appends to them with a bare `$GZ_SIM_RESOURCE_PATH`
+# and `$GZ_SIM_SYSTEM_PLUGIN_PATH` -- no `:-` default. Under `set -u` that is a
+# fatal "unbound variable" on a shell where they are not already exported, so
+# any script that sources this file with `set -euo pipefail` died on the first
+# clean shell: scripts/run_system.sh aborted before starting a single process,
+# and the error named a file inside PX4-Autopilot rather than the missing step.
+# It only appeared to work when the operator had already run `source sim/env.sh`
+# by hand, which is what the RUN_GUIDE quick start does.
+#
+# The else-branch below and step 2 expand the same variables, so seeding here
+# covers every path through this file.
+export GZ_SIM_RESOURCE_PATH="${GZ_SIM_RESOURCE_PATH:-}"
+export GZ_SIM_SYSTEM_PLUGIN_PATH="${GZ_SIM_SYSTEM_PLUGIN_PATH:-}"
+
 # 1. PX4's environment: plugins, server config, stock models.
 _PX4_GZ_ENV="$PX4_DIR/build/px4_sitl_default/rootfs/gz_env.sh"
 if [ -f "$_PX4_GZ_ENV" ]; then
@@ -54,6 +70,18 @@ fi
 
 # 2. Our assets take precedence.
 export GZ_SIM_RESOURCE_PATH="$DRONEPROGRAM_ROOT/sim/models:$DRONEPROGRAM_ROOT/sim/worlds:$GZ_SIM_RESOURCE_PATH"
+
+# 2b. Drop the empty entries the seeding above leaves behind. On a clean shell
+#     the seed is "", so composing it produces "ours:...::px4:..." -- and Gazebo
+#     reads an empty path entry as the current working directory, which would
+#     make model lookup depend on where you happened to be standing.
+_strip_empty_entries() {
+    printf '%s' "$1" | sed -e 's/::*/:/g' -e 's/^://' -e 's/:$//'
+}
+GZ_SIM_RESOURCE_PATH="$(_strip_empty_entries "$GZ_SIM_RESOURCE_PATH")"
+GZ_SIM_SYSTEM_PLUGIN_PATH="$(_strip_empty_entries "$GZ_SIM_SYSTEM_PLUGIN_PATH")"
+export GZ_SIM_RESOURCE_PATH GZ_SIM_SYSTEM_PLUGIN_PATH
+unset -f _strip_empty_entries
 
 # 3. Override PX4's spawn/world lookup (effective under PX4_GZ_STANDALONE=1).
 export PX4_GZ_MODELS="$DRONEPROGRAM_ROOT/sim/models"

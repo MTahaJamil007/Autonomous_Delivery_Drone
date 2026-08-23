@@ -24,6 +24,7 @@ WHAT IT CHECKS
   4. The landing pad models exist and their ArUco textures actually decode.
   5. MAVSDK connects on 14540+i.
   6. The obstacle memory service answers on its port.
+  7. The fleet dispatcher answers on its port and its database is queryable.
 
 Usage:
     python3 scripts/preflight.py                    # every drone in the fleet
@@ -413,6 +414,59 @@ async def check_obstacle_service(report: Report, timeout_s: float = 5.0) -> None
     report.add("obstacle memory service", PASS, f"{url} -> {body.get('service', 'ok')}")
 
 
+async def check_dispatch_service(report: Report, timeout_s: float = 5.0) -> None:
+    """The dispatcher serves the UI and every job endpoint; nothing works without it.
+
+    This check exists because it was the one service preflight never looked at.
+    A stale fleet.db crashed fleet_dispatch during startup lifespan, and
+    preflight still reported "8 checks, 0 failures" while run_system.sh printed
+    "System ready. Open http://localhost:5000" at a port with nothing behind it.
+    The only symptom was the browser failing to connect.
+
+    /fleet/status rather than / on purpose: it answers out of the database, so a
+    pass means the schema is queryable too, not merely that a socket is open.
+    """
+    try:
+        import aiohttp
+    except ImportError:
+        report.add("fleet dispatch service", SKIP, "aiohttp not importable")
+        return
+
+    url = f"{config.FLEET_DISPATCH_URL}/fleet/status"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout_s)) as response:
+                if response.status != 200:
+                    report.add(
+                        "fleet dispatch service", FAIL, f"{url} returned HTTP {response.status}"
+                    )
+                    return
+                body = await response.json()
+    except Exception as exc:  # noqa: BLE001
+        report.add(
+            "fleet dispatch service",
+            FAIL,
+            f"{url} unreachable ({type(exc).__name__}). It should be running on "
+            f"port {config.FLEET_DISPATCH_PORT}; if run_system.sh started it, it "
+            f"has since exited -- read $LOG_DIR/fleet_dispatch.log for the "
+            f"traceback. Nothing can be dispatched and the web UI will not load.",
+        )
+        return
+
+    fleet_size = body.get("fleet_size", 0)
+    if fleet_size != len(config.DRONE_IDS):
+        report.add(
+            "fleet dispatch service",
+            FAIL,
+            f"{url} reports {fleet_size} drone(s), config.DRONE_IDS has "
+            f"{len(config.DRONE_IDS)}. The dispatcher is running against a "
+            f"database registered for a different fleet size.",
+        )
+        return
+
+    report.add("fleet dispatch service", PASS, f"{url} -> {fleet_size} drone(s) registered")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Entry point
 # ─────────────────────────────────────────────────────────────────────────────
@@ -447,6 +501,9 @@ async def run(drone_ids: list[str], skip: set[str], mavsdk_timeout_s: float) -> 
     if "obstacles" not in skip:
         await check_obstacle_service(report)
 
+    if "dispatch" not in skip:
+        await check_dispatch_service(report)
+
     return report
 
 
@@ -467,7 +524,7 @@ def main(argv: list[str] | None = None) -> int:
         "--skip",
         action="append",
         default=[],
-        choices=["topics", "geometry", "mavsdk", "obstacles", "pads"],
+        choices=["topics", "geometry", "mavsdk", "obstacles", "pads", "dispatch"],
         help="Skip a check group (repeatable).",
     )
     parser.add_argument(

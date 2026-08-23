@@ -3,6 +3,10 @@
 #
 #   scripts/run_system.sh          # config.FLEET_SIZE drones
 #   scripts/run_system.sh 3        # override
+#   scripts/run_system.sh --force  # start even if the pid file looks live
+#
+# It refuses to start on top of a previous run: a second avoider on one drone is
+# finding F7 all over again. Run scripts/stop_system.sh first.
 #
 # Run world/spawn_fleet.sh FIRST (it starts Gazebo and the PX4 instances), then
 # this. Order matters: the sensor topics do not exist until the drones have
@@ -32,10 +36,76 @@ cd "$PROJECT_ROOT"
 # shellcheck disable=SC1091
 source "$PROJECT_ROOT/sim/env.sh"
 
+FORCE=0
+POSITIONAL=()
+for arg in "$@"; do
+    case "$arg" in
+        --force) FORCE=1 ;;
+        *)       POSITIONAL+=("$arg") ;;
+    esac
+done
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
+
 FLEET_SIZE="${1:-$(python3 -c 'import config; print(config.FLEET_SIZE)')}"
 LOG_DIR="${LOG_DIR:-/tmp/droneprogram}"
 PID_FILE="$LOG_DIR/run_system.pids"
 mkdir -p "$LOG_DIR"
+
+# ── Refuse to double-start ───────────────────────────────────────────────────
+# A second run of this script used to stack a whole extra set of processes on
+# top of the live one. The shared services survive it (the second obstacle_memory
+# and fleet_dispatch die on EADDRINUSE, which is loud but harmless), but the
+# per-drone processes bind no ports: a second vision bridge and a SECOND AVOIDER
+# come up alongside the first and both then drive the same drone off the same
+# LiDAR. That is finding F7 -- the exact condition this script's header explains
+# it was written to prevent -- reintroduced by running it twice.
+#
+# Worse, the run below overwrites PID_FILE, so stop_system.sh loses every pid
+# from the first stack and cannot clean up what it can no longer see.
+#
+# So: if the recorded pids are still alive, stop and say so. `--force` skips the
+# check for the case where the pid file is stale in a way this cannot detect.
+live_recorded_processes() {
+    [ -f "$PID_FILE" ] || return 0
+
+    local pid name cmdline
+    while read -r pid name; do
+        [ -n "${pid:-}" ] || continue
+        kill -0 "$pid" 2>/dev/null || continue
+
+        # A dead pid can be reused by something unrelated, and refusing to start
+        # because of a stranger's pid would be its own bug. Only count it if the
+        # command line still looks like one of ours.
+        cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+        case "$cmdline" in
+            *"$PROJECT_ROOT"* | *obstacle_memory* | *fleet_dispatch* \
+            | *perception.vision_bridge* | *avoider_node* \
+            | *ros_gz_bridge* | *parameter_bridge*)
+                printf '  %-26s pid %s\n' "${name:-?}" "$pid"
+                ;;
+        esac
+    done < "$PID_FILE"
+}
+
+RUNNING="$(live_recorded_processes)"
+if [ -n "$RUNNING" ] && [ "$FORCE" -eq 0 ]; then
+    cat >&2 <<EOF
+ERROR: support processes from a previous run are still alive:
+
+$RUNNING
+
+Starting again would run a second avoider and a second vision bridge against
+the same drone (finding F7), and would overwrite $PID_FILE so
+stop_system.sh could no longer stop the processes above.
+
+  Stop them first:  scripts/stop_system.sh
+  Then:             scripts/run_system.sh${1:+ $1}
+
+If you are certain those pids are stale, re-run with --force.
+EOF
+    exit 1
+fi
+
 : > "$PID_FILE"
 
 start() {
