@@ -199,19 +199,36 @@ the drone returns to `AVAILABLE`.
 ## § 7 — Twenty scripted landings
 
 ```bash
-# 20 runs, from 8 m, with a ±5 m lateral offset, cycling markers 0/1/2.
-for run in $(seq 1 20); do
-  python3 scripts/sitl_landing_trial.py --run "$run" \
-      --marker-id $((run % 3)) --start-alt 8 --offset 5 \
-      >> /tmp/droneprogram/landing_trials.log
-done
+world/spawn_fleet.sh 1 && scripts/run_system.sh 1     # rig up, preflight must pass
+python3 scripts/sitl_landing_trial.py                 # 7 dispatches = 21 landings
+python3 scripts/sitl_landing_trial.py --analyse-only  # re-score without re-flying
 ```
 
-> `scripts/sitl_landing_trial.py` is **not** shipped. Writing it is the first
-> task of whoever runs this gate, and it should reuse
-> `drone_agent.landing.execute_precision_landing` directly rather than going
-> through the dispatcher, so a failure is attributable to the landing controller
-> and not to the mission around it.
+`scripts/sitl_landing_trial.py` **is now shipped.** It flies whole delivery
+missions through `/dispatch` — three landings each, on markers 0, 1 and 2, from
+a different bearing and range every time — and scores touchdown error against
+**Gazebo ground truth**, never the drone's own EKF. The other three criteria it
+reads back out of the mission and vision logs. It exits non-zero unless all four
+pass.
+
+> **This reverses the instruction that used to sit here**, which said the script
+> should call `drone_agent.landing.execute_precision_landing` directly rather
+> than go through the dispatcher, "so a failure is attributable to the landing
+> controller and not to the mission around it".
+>
+> The first live session with the rewritten controller settled that argument the
+> other way. Four defects surfaced, and **three of them were not in the landing
+> controller**: touchdown was never detected because PX4 will not report
+> `ON_GROUND` while OFFBOARD streams a descent; leg 2 hovered until timeout
+> because nothing re-entered OFFBOARD after the land command that confirms a
+> touchdown; and the mission FSM was driven to `SEARCHING` on the way down and
+> then rejected the touchdown it had just achieved. Each one made the delivery
+> fail. A harness that bypassed the mission would have reported four flawless
+> landings and a system that cannot deliver a package.
+>
+> Attribution is cheap to recover afterwards — the per-attempt table names the
+> phase each attempt reached — while coverage given up by bypassing the real
+> path is not.
 
 **Pass, all four:**
 - ≥19 of 20 touchdowns within 0.5 m of pad centre.

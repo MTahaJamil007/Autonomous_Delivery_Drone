@@ -16,7 +16,7 @@ own. A boundary with no owner is a boundary that drifts.
 | Producer | Transport | Payload | Consumer |
 | --- | --- | --- | --- |
 | Gazebo `downward_camera` | gz topic, **model-scoped** (§5) | `gz.msgs.Image`, 320×240 RGB8, 10 Hz | `perception/vision_bridge.py` |
-| `vision_bridge.py` | UDP `5005 + 10·i` | `{t, seq, w, h, fx, drone_id, detections[]}` (§2) | `DroneMission.vision_data` |
+| `vision_bridge.py` | UDP `5005 + 10·i` | `{t, seq, w, h, fx, drone_id, pads[], detections[]}` (§2) | `DroneMission.vision_data` |
 | Gazebo `rplidar_a1` | gz topic → `ros_gz_bridge` → `/drone_i/scan` | `sensor_msgs/LaserScan`, 360 pts, 10 Hz | `avoider_node.py` |
 | `avoider_node.py` | UDP `5006 + 10·i` | `{t, seq, action, eff_front_m, …}` (§3) | `DroneMission.lidar_data` |
 | PX4 SITL | MAVLink UDP `14540 + i` | MAVSDK telemetry / offboard | `DroneMission` + `SetpointPublisher` |
@@ -37,25 +37,49 @@ One datagram **per frame**, including frames with no detections:
   "t": 12345.678,          // seconds, time.monotonic() in the PRODUCER
   "seq": 4711,             // monotonically increasing; gaps mean dropped datagrams
   "w": 320, "h": 240,      // live image size, not a config constant
-  "fx": 277.2,             // derived from the LIVE width: (w/2)/tan(hfov/2)
+  "fx": 277.19,            // derived from the LIVE width: (w/2)/tan(hfov/2)
   "drone_id": "drone-0",
+  "pads": [
+    {
+      "pad_id": 0,                    // which pad; equals its centre marker's id
+      "err_x": -12.4, "err_y": 5.1,   // PAD CENTRE, px from image centre: +x right, +y down
+      "px_per_m": 92.4,               // local image scale at the pad centre
+      "range_m": 3.00,                // fx / px_per_m: height above the PAD
+      "residual_m": 0.0035,           // spread of the per-marker estimates
+      "markers": [0, 10, 11],         // which markers contributed
+      "largest_side_px": 53.6,
+      "clipped": false                // true if a marker touched the frame edge
+    }
+  ],
   "detections": [
     {
       "id": 0,                       // ArUco DICT_4X4_50 id
       "err_x": -12.5, "err_y": 5.0,  // px from image centre: +x right, +y down
       "area_px": 3021.0,
-      "size_px": 55.4,               // mean side length; compare with MARKER_MIN_DECODE_PX
+      "size_px": 55.4,
       "corners": [[x, y], [x, y], [x, y], [x, y]]
     }
   ]
 }
 ```
 
-Three properties are load-bearing:
+`pads` is what the landing loop reads; `detections` is the per-marker view kept
+for debugging, for `scripts/preflight.py` and for the legacy
+`landing.select_target()` contract.
 
-- **`detections` is a list, and every marker in frame is in it.** The old bridge
-  sent `corners[0][0]` — the first marker only — so `landing.select_target()`
-  could never see the pad it was asked for when several were visible.
+Four properties are load-bearing:
+
+- **`pads` reports the PAD CENTRE, not a marker.** Each pad carries five markers
+  at two scales (§6), and every visible one votes on where the pad's centre is,
+  via a homography from its four known pad-frame corners to its four image
+  corners. One marker is enough. That is what keeps the estimate alive from 8 m
+  — where only the large outer ring is readable — down to 0.5 m, where only the
+  small centre marker still fits the frame.
+- **`px_per_m` makes the measurement metric without an altitude.** Each marker's
+  real size is known, so the consumer divides rather than multiplying by a
+  drifting EKF altitude. `range_m` falls out as an *independent* measurement of
+  height above the pad, which is not the same as height above wherever the drone
+  took off.
 - **An empty list is a positive statement.** "The camera is alive and sees
   nothing" must be distinguishable from "the bridge is dead". Sending nothing at
   all conflates them.
@@ -160,6 +184,40 @@ ways the old code broke it:
    tracks `max_gap_s` and logs an error above 0.4 s, while there is still time
    to react.
 
+### The one time the publisher does re-enter OFFBOARD
+
+The invariant above is about **not leaving voluntarily**. It says nothing about
+what to do when the autopilot leaves on its own, and it does: confirming a
+touchdown means commanding `action.land()` and waiting for a real disarm, which
+takes PX4 into Land and then Disarmed by design. The next leg's takeoff leaves
+it in Hold.
+
+For as long as that went unhandled, **a mission could only ever fly one leg.**
+Leg 2 armed, climbed to cruise altitude, announced that it was navigating, and
+then hovered motionless until the navigation timeout — because
+`SetpointPublisher.start()` returned early whenever its publishing task was
+alive. The task *was* alive and the setpoints *were* streaming at 20 Hz. They
+were being ignored, because PX4 was not in offboard to receive them.
+
+**"The publisher is running" and "the autopilot is following it" are two
+different facts, and only the second one matters.** `ensure_offboard()` checks
+the second, and re-enters only when it is false. That is recovery, not thrashing:
+it fires once per leg at most, and only after a mode change this system itself
+requested.
+
+Three MAVSDK details make that harder than it sounds, none of them in the
+docstrings:
+
+| Call | Docstring says | Actually does |
+| --- | --- | --- |
+| `offboard.is_active()` | "the vehicle is in offboard mode" | reports the **plugin's own flag**, not the vehicle's mode — so it stays True after a land |
+| `offboard.start()` when the plugin thinks it is active | starts offboard | returns `Success` and **sends nothing** |
+| `offboard.start()` after `stop()` | starts offboard | `NoSetpointSet` until a `set_*` call re-arms the handshake |
+
+So the check reads `telemetry.flight_mode()` (which comes from the vehicle's
+HEARTBEAT), and re-entry is `stop()` → prime with zero-velocity setpoints →
+`start()`. Each of those three steps exists because a flight failed without it.
+
 **Only NED is streamed.** World-frame velocity is unaffected by attitude. A
 body-frame command is relative to the nose, and when PX4 brakes the nose pitches
 up — a flat-mounted 2D LiDAR then stares at the sky, returns infinity, the
@@ -175,51 +233,81 @@ using the held heading, keeping the publisher single-frame.
 The camera is 320×240 with `hfov = 1.047 rad`, so
 
 ```
-fx = (w/2) / tan(hfov/2) = 160 / tan(0.5235) = 277.2 px
+fx = (w/2) / tan(hfov/2) = 160 / tan(0.5235) = 277.19 px
 ```
 
-A marker of side `s` at altitude `h` spans `fx·s/h` pixels, and a 4×4 ArUco tag
-needs roughly **25–30 px** to decode reliably:
+There are **two** ways a marker becomes unusable, and the landing loop has to
+survive both.
 
-| Altitude | 0.5 m pad (original) | 2.0 m pad (shipped) |
-| --- | --- | --- |
-| 10 m (cruise) | **13.9 px** — undecodable | 55.4 px |
-| 6 m (`SEARCH_ALT_M`) | 23.1 px — marginal | **92.4 px** |
-| 3 m | 46.2 px | 184.8 px |
+**Too small, high up.** A marker of side `s` at altitude `h` spans `fx·s/h`
+pixels, and a 4×4 ArUco tag needs roughly 25–30 px. A 0.5 m marker spans 13.9 px
+at cruise altitude — undecodable. That is why the pads are 2.0 m and why the
+drone descends to `SEARCH_ALT_M` before searching.
 
-The documented flow — arrive at `TARGET_ALT`, then search — therefore could not
-lock even with a decodable texture. **Both** levers are applied, because either
-alone is fragile: 2 m pads *and* a descent to `SEARCH_ALT_M` before searching.
+**Too large, low down.** This is the one that cost a delivery. ArUco needs a
+marker's four corners *and* its white quiet zone inside the frame, so a marker
+of side `s` centred under the camera is readable only above
 
-**The figures above are plane widths, and the decoder sees less.** The pad
-textures carry a white quiet zone — the reason they decode at all — so the black
-marker is 79.6% of the plane (measured: 199 px of a 250 px texture).
-`config.decodable_px_at_altitude()` applies that factor, and it is the function
-to compare against `MARKER_MIN_DECODE_PX`. Marker-corrected, the shipped pad is
-44 px at cruise altitude, and the original 0.5 m pad is **below the threshold at
-every altitude the mission would have searched from** — not merely marginal.
-Confirmed in flight at 5.51 m: 88.6 px measured against an 80.1 px
-marker-corrected prediction. See [CALIBRATION.md](CALIBRATION.md) § 3.
+```
+h ≥ s · (1 + 2·quiet) / (2·tan(v))        tan(v) = (h_px/2)/fx = 0.4330
+```
 
-`config.PAD_SIZE_M` must match `sim/models/pad_N/model.sdf`, and
-`config.CAMERA_*` must match `sim/models/x500_delivery/model.sdf`. Both pairs
-are asserted by `tests/test_landing_control.py`, and `scripts/preflight.py`
-checks the live sensor against config before anything flies.
+The original pad carried a single 1.592 m marker, giving a floor of 2.76 m.
+Measured against the real detector and the project's own texture: lock was first
+lost at **2.52 m** centred, **3.42 m** with 8° of airframe tilt, and was
+impossible below 1.8 m in any condition. The landing loop answered that loss by
+climbing back to `SEARCH_ALT_M`, which restored the lock, which permitted
+another descent — the hover the operator reported, repeating until the timeout.
 
-### Why the loop runs in metres
+### The nested pad
+
+`world/pad_layout.py` is the single source of truth; `world/build_pads.py`
+generates the textures and SDFs from it.
+
+| id | side | position | in frame ≥ | decodes ≤ |
+| --- | --- | --- | --- | --- |
+| `p` | 0.40 m | (0.00, 0.00) | 0.69 m | 4.44 m |
+| `10p+10` / `10p+11` | 0.58 m | (∓0.65, 0.00) | 1.88 m | 6.43 m |
+| `10p+12` / `10p+13` | 0.58 m | (0.00, ∓0.65) | 2.51 m | 6.43 m |
+
+At least one marker is usable from **0.69 m to 6.43 m** with no gap, and the
+real detector manages 0.50 m to beyond 8 m. The east/west pair sits on the
+image's *wide* axis, so it stays in frame 0.63 m lower than the north/south
+pair — that asymmetry buys overlap for free.
+
+Below the vision floor the loop stops needing vision at all and commits
+open-loop, which is what PX4's PrecLand (`PLD_FAPPR_ALT`) and ArduPilot's
+PrecLand both do.
+
+`config.PAD_VISION_MIN_ALT_M` / `MAX` and `config.COMMIT_ALT_M` are **derived**
+from this table rather than chosen, and `scripts/preflight.py` re-derives them
+from the shipped files. A texture missing its centre marker, or a search
+altitude above the ceiling, fails on the bench.
+
+### Why the loop runs in metres, and no longer in altitudes
 
 Pixel error for a fixed ground offset grows as `1/h`, so a pixel-gain controller
 has effective gain `K_p·fx/h`:
 
-| Altitude | Effective gain (old, `K_p = 0.015`) |
+| Altitude | Effective gain (original, `K_p = 0.015`) |
 | --- | --- |
 | 10 m | 0.42 s⁻¹ — sluggish but stable |
 | 1 m | **4.16 s⁻¹** — overshoot and oscillation, exactly at touchdown |
 
-Converting to metres *first* (`offset_m = err_px · h / fx`) and then applying a
-fixed metric gain makes the loop altitude-invariant. This also delivers most of
-what `solvePnP` was deferred for, with no calibration rig. Signs are derived in
-[CALIBRATION.md](CALIBRATION.md).
+The first fix converted to metres with `offset_m = err_px · h / fx`, which made
+the gain altitude-invariant but tied every measurement to the EKF's altitude.
+The current design removes altitude from the measurement path entirely: the
+homography's Jacobian at the pad centre *is* the local pixels-per-metre, so
+
+```
+offset_m = err_px / px_per_m
+```
+
+Measured accuracy against rendered ground truth: **3–8 mm below 3 m**, 21 mm at
+8 m, with range good to better than 1% below 6 m. Signs are derived in
+[CALIBRATION.md](CALIBRATION.md), and tilt is corrected by steering the pad to
+the *nadir* point rather than the image centre — at 6 m and 5° of tilt the
+uncorrected error is 0.52 m, twice the centring tolerance.
 
 ---
 

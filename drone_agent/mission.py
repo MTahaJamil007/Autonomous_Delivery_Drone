@@ -126,11 +126,19 @@ class DroneMission:
             "battery_pct": None,
             "landed_state": None,
             "armed": False,
+            # None, not 0.0, until attitude telemetry actually arrives. The
+            # landing loop skips tilt compensation on None and would silently
+            # apply a wrong correction on a fabricated zero.
+            "roll_deg": None,
+            "pitch_deg": None,
+            "heading_deg": None,
+            "landing_phase": None,
             "status": "created",
             udp_receiver.TELEMETRY_TS_KEY: 0.0,
         }
         self.vision_data: dict[str, Any] = {
             "detections": [],
+            "pads": [],
             udp_receiver.VISION_TS_KEY: 0.0,
         }
         self.lidar_data: dict[str, Any] = {
@@ -305,11 +313,32 @@ class DroneMission:
             async for armed in self._drone.telemetry.armed():
                 self.drone_state["armed"] = armed
 
+        async def attitude() -> None:
+            # Two things the landing loop cannot do without.
+            #
+            # ROLL AND PITCH: the downward camera is bolted to the airframe, so
+            # whenever PX4 tilts to accelerate, the point on the ground directly
+            # beneath the drone stops being the centre pixel. The pad appears
+            # displaced by range * tan(tilt) -- 0.52 m at 6 m and 5 degrees,
+            # which is twice the centring tolerance. landing.nadir_offset_px
+            # corrects for it, and silently does nothing without these.
+            #
+            # YAW: the body-to-NED rotation needs the drone's TRUE heading. The
+            # previous code read publisher.setpoint.yaw_deg -- its own last
+            # COMMANDED yaw -- so any difference between commanded and actual
+            # heading rotated every landing correction by that error.
+            async for att in self._drone.telemetry.attitude_euler():
+                self.drone_state["roll_deg"] = att.roll_deg
+                self.drone_state["pitch_deg"] = att.pitch_deg
+                self.drone_state["heading_deg"] = att.yaw_deg % 360.0
+                self.drone_state[udp_receiver.TELEMETRY_TS_KEY] = time.monotonic()
+
         for coro, name in (
             (position(), "telemetry-position"),
             (battery_stream(), "telemetry-battery"),
             (landed_state(), "telemetry-landed"),
             (armed_state(), "telemetry-armed"),
+            (attitude(), "telemetry-attitude"),
         ):
             self._spawn_task(coro, name)
 

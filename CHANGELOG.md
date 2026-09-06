@@ -7,6 +7,128 @@ carries the rest.
 
 ---
 
+## 0.9.0 — Precision landing that actually lands
+
+Started from one operator report:
+
+> "I have run a simulation of delivery but the drone was not able to land. The
+> program in which the drone detects the ArUco marker and then lands hovers
+> around it and moves down in spiral shape is no good actually."
+
+The full working log, flight by flight, is in
+[docs/LANDING_REWRITE_LOG.md](docs/LANDING_REWRITE_LOG.md).
+
+### The root cause: the pad was invisible over the last two metres
+
+Not the gains, not the signs — the field of view. The pad carried a single
+1.592 m ArUco marker, and ArUco needs a marker's four corners *and* its white
+quiet zone inside the frame. For this camera (320x240, hfov 1.047, fx 277.2 px)
+that marker is unreadable below
+
+    s * (1 + 2*quiet) / (2*tan(v))  =  2.76 m
+
+Measured in Gazebo's own renderer against the real detector, the old pad decoded
+from 2.00 m up when perfectly centred and only from **2.76 m** up with a
+realistic 0.30 m offset. Below that the drone was blind.
+
+The controller answered a lost marker by dropping into the GPS-spiral search
+branch, which **commands a climb back to `SEARCH_ALT_M`**. Climbing restored the
+lock, which permitted another descent, which went blind again. That limit cycle
+is exactly "hovers around it and moves down in a spiral, never lands", and no
+amount of tuning could have fixed it.
+
+### The fix: a nested pad, and a controller that cannot climb away
+
+- **`world/pad_layout.py`** — pads now carry five markers at two scales: a
+  0.40 m centre marker plus four 0.58 m markers at 0.65 m radius. At least one is
+  readable from **0.50 m to beyond 8 m**, measured in the live renderer.
+  `world/build_pads.py` generates the textures and SDF from that one source.
+- **`perception/pad_estimator.py`** — any *single* visible marker fixes the pad
+  centre, via a homography from its four known pad-frame corners. Scale comes
+  out of the same homography, so the offset is in **metres without needing an
+  altitude estimate at all**, and `range_m` falls out as an independent
+  cross-check. Measured against ground truth: **26 mm** centred, **39 mm** at a
+  0.30 m offset, across the whole decode band.
+- **`drone_agent/landing.py`** — rewritten. An alpha-beta tracker (position
+  *and* velocity, so a dropped frame is coasted rather than treated as a lost
+  lock); tilt/nadir correction, because a rigidly-mounted camera swings
+  `range * tan(tilt)` off nadir when the airframe accelerates; a descent gate
+  with a floor and hysteresis, so it cannot close on noise or chatter; an
+  **altitude ratchet** and a `NO_CLIMB_ALT_M` floor, which together make a
+  landing attempt monotonic by construction; and an open-loop **commit** below
+  `COMMIT_ALT_M`, matching PX4 PrecLand's `PLD_FAPPR_ALT` and ArduPilot's
+  equivalent.
+
+`COMMIT_ALT_M` is derived from the pad geometry rather than chosen, and the live
+sweep confirms the derivation: the measured off-centre vision floor is 1.20 m and
+`COMMIT_ALT_M` is 1.20 m. The descent goes open-loop exactly where the
+measurement stops existing.
+
+### Four more defects, none of them findable on the bench
+
+Every one lives *past a successful touchdown*, so until the landing itself worked
+no flight had ever reached them.
+
+1. **Touchdown was never detected.** `is_on_ground` let an explicit `IN_AIR`
+   veto the height check. PX4's land detector will not declare a landing while
+   OFFBOARD streams it a descent, so `IN_AIR` is not a late report there — it is
+   a permanent one. A flight that committed 0.042 m off centre and settled
+   0.12 m from the pad reported `stalled` and failed the mission. A sustained low
+   height is now sufficient on its own, and a commit that overruns hands over to
+   the autopilot's land mode before calling anything a failure.
+2. **A mission could only fly one leg.** Confirming a touchdown commands
+   `action.land()`, which takes PX4 out of OFFBOARD; the next takeoff leaves it
+   in HOLD. `SetpointPublisher.start()` returned early because its publishing
+   task was alive — true, and beside the point: setpoints were streaming at
+   20 Hz into a mode that was not listening. `ensure_offboard()` now re-enters
+   when the vehicle has actually left.
+3. **The FSM was left in an illegal state.** A lock loss below `NO_CLIMB_ALT_M`
+   fired `lock_lost`, driving `APPROACH -> SEARCHING` at the moment the landing
+   was being committed — and `SEARCHING` has no `touchdown` transition, so the
+   successful landing that followed was rejected along with every later event.
+   `lock_lost` now fires only where searching is something the loop would
+   actually do.
+4. **Three MAVSDK behaviours that contradict their own docstrings**, found by
+   reading the implementation after flights contradicted the documentation:
+   `offboard.is_active()` reports the *plugin's* local flag rather than the
+   vehicle's mode; `offboard.start()` returns Success and sends nothing when the
+   plugin thinks it is already active; and after a `stop()` it returns
+   `NoSetpointSet` until a `set_*` call re-arms the handshake.
+
+### The pattern behind all four: doubles kinder than the hardware
+
+| | The double said | The real system said |
+| --- | --- | --- |
+| Touchdown | land detector latches `ON_GROUND` at 0.05 m | never latches while offboard streams a descent |
+| Offboard | publisher running ⇒ autopilot following | the autopilot had silently left the mode |
+| FSM | every event is accepted | `SEARCHING` rejects `touchdown` |
+| MAVSDK | `is_active()` means the vehicle's mode | it means the client's own flag |
+
+Each fake modelled its collaborator's *intent* instead of its *behaviour*, so
+none of them could fail the way the real thing fails. Every fix here comes with
+a regression test built by making the double **stricter**, and each was verified
+to fail against the code as it flew.
+
+### Also
+
+- **`scripts/sitl_landing_trial.py`** — now shipped. ACCEPTANCE § 7 previously
+  said it was not, and told whoever wrote it to bypass the dispatcher. That
+  instruction is reversed, with reasons: three of the four defects above were in
+  the mission around the controller, and a harness that bypassed it would have
+  reported flawless landings on a system that could not deliver a package.
+- **`sim/set_sim_params.py`** — PX4's `SIM_BAT_DRAIN` defaults to **60 s**,
+  shorter than one leg of a delivery, so the low-battery failsafe cut every
+  multi-leg test short. Now set to a realistic endurance at spawn. The battery
+  *gate* in `drone_agent/battery.py` is untouched.
+- **`scripts/preflight.py`** — two new gates that would have caught the original
+  defect on the bench: every pad's markers must decode, and the pad's visible
+  altitude band must contain the search, commit and no-climb altitudes.
+- **`drone_agent/mission.py`** — attitude telemetry, without which the tilt
+  correction silently did nothing and the loop steered on *commanded* yaw rather
+  than actual heading.
+
+---
+
 ## 0.8.0 — Remediation
 
 Closes the gap between what the documentation claimed and what the code did.

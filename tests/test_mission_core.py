@@ -117,11 +117,38 @@ def test_invalid_drone_id_is_rejected_at_construction():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class FakeOffboardError(Exception):
+    """Stands in for mavsdk.offboard.OffboardError, which carries a _result."""
+
+    def __init__(self, result_str):
+        super().__init__(result_str)
+
+        class _R:
+            pass
+
+        self._result = _R()
+        self._result.result_str = result_str
+
+
 class FakeOffboard:
     def __init__(self):
         self.sent: list[tuple] = []
         self.started = 0
         self.stopped = 0
+        # TWO separate facts, which is the whole point of this double.
+        #
+        # `plugin_thinks_active` is MAVSDK's own local flag, set by start() and
+        # cleared by stop(). `vehicle_mode` is what PX4 is really doing. They
+        # diverge the moment the autopilot changes mode by itself -- a land
+        # command, a failsafe, an RC override -- because nothing tells the
+        # plugin. A double that collapsed them into one boolean could not
+        # reproduce the bug that grounded multi-leg missions.
+        self.plugin_thinks_active = False
+        self.vehicle_mode = "HOLD"
+        # Whether a setpoint has been pushed through the plugin since the last
+        # stop(). start() fails with NoSetpointSet until one has.
+        self.setpoint_seen = False
+        self.start_rejections = 0
 
     async def set_velocity_ned(self, velocity):
         self.sent.append(
@@ -132,17 +159,49 @@ class FakeOffboard:
                 velocity.yaw_deg,
             )
         )
+        # In MAVSDK it is the set_* calls -- never start() -- that take the
+        # plugin out of Mode::NotActive. Modelled, because start() returns
+        # NoSetpointSet without it.
+        self.setpoint_seen = True
 
     async def start(self):
         self.started += 1
+        # MAVSDK short-circuits to Success without sending anything when it
+        # already believes offboard is active. Modelled, because it is the
+        # reason re-entry has to stop() first.
+        if self.plugin_thinks_active:
+            return
+        if not self.setpoint_seen:
+            self.start_rejections += 1
+            raise FakeOffboardError("NoSetpointSet")
+        self.plugin_thinks_active = True
+        self.vehicle_mode = "OFFBOARD"
 
     async def stop(self):
         self.stopped += 1
+        self.plugin_thinks_active = False
+        self.setpoint_seen = False
+        self.vehicle_mode = "HOLD"
+
+    async def is_active(self):
+        # Deliberately reports the PLUGIN's local state, not the vehicle's mode
+        # -- which is exactly what MAVSDK does, and exactly why this is not the
+        # question SetpointPublisher asks.
+        return self.plugin_thinks_active
+
+
+class FakeFlightModeTelemetry:
+    def __init__(self, offboard):
+        self._offboard = offboard
+
+    async def flight_mode(self):
+        yield f"FlightMode.{self._offboard.vehicle_mode}"
 
 
 class FakeDrone:
     def __init__(self):
         self.offboard = FakeOffboard()
+        self.telemetry = FakeFlightModeTelemetry(self.offboard)
 
 
 async def test_publisher_streams_continuously_and_enters_offboard_once():
@@ -496,3 +555,110 @@ async def test_px4_param_failure_does_not_abort_the_mission():
     applied, problems = await px4_params.apply_params(BrokenDrone())
     assert applied == {}
     assert len(problems) == len(config.PX4_PARAMS), "every failure must be reported"
+
+
+async def test_publisher_re_enters_offboard_after_the_autopilot_leaves_it():
+    """A mission must be able to fly more than one leg.
+
+    THE FLIGHT THAT EXPOSED THIS. Leg 1 landed perfectly. Leg 2 armed, climbed
+    to 9.6 m, announced that it was navigating -- and then hovered over the
+    pickup pad, motionless, until the navigation timeout:
+
+        15:08:33  disarmed - landing confirmed        (leg 1 lands)
+        15:08:36  NEXT_LEG --[more_legs]--> TAKEOFF
+        15:08:53  at 9.6 m ... navigating to (30.031293, 72.314083)
+        15:11:53  still at x=24.85 y=-0.02 z=9.76     (three minutes later)
+
+    THE CAUSE. Confirming a touchdown means commanding `action.land()` and
+    waiting for a real disarm, and that takes PX4 out of offboard by design. The
+    next leg's takeoff leaves it in Takeoff/Hold. `start()` then returned early
+    because its publishing task was still alive -- which was true, and beside
+    the point: the setpoints were streaming at 20 Hz into a mode that was not
+    listening.
+
+    "Publisher is running" and "the autopilot is following it" are two different
+    facts, and only the second one matters. This pins the second.
+
+    It had never been observable before, because until the touchdown-detection
+    fixes no flight had ever completed leg 1.
+    """
+    drone = FakeDrone()
+    publisher = SetpointPublisher(drone, "drone-0", hz=50)
+
+    await publisher.start()
+    assert drone.offboard.started == 1
+    assert drone.offboard.vehicle_mode == "OFFBOARD"
+
+    # Leg 1 ends. Confirming the touchdown lands and disarms, which drops the
+    # AUTOPILOT out of offboard -- while MAVSDK's own flag stays stale at True,
+    # exactly as it does in the real client.
+    drone.offboard.vehicle_mode = "LAND"
+    assert await drone.offboard.is_active(), (
+        "precondition: MAVSDK still claims offboard is active, which is the "
+        "trap this test exists to cover"
+    )
+
+    # Leg 2 takes off and hands back over. The task is still alive, so the old
+    # code returned here having done nothing.
+    await publisher.start()
+
+    assert drone.offboard.started == 2, (
+        "the publisher must re-enter OFFBOARD when the autopilot has left it; "
+        "otherwise leg 2 streams setpoints nobody is listening to"
+    )
+    assert drone.offboard.vehicle_mode == "OFFBOARD"
+
+    await publisher.stop()
+
+
+async def test_publisher_does_not_thrash_offboard_when_it_is_already_active():
+    """The other half of the contract, and the reason for the is_active check.
+
+    Re-entering on every call would be exactly the mode thrashing this class was
+    written to eliminate. It must re-enter only when the autopilot has actually
+    dropped out.
+    """
+    drone = FakeDrone()
+    publisher = SetpointPublisher(drone, "drone-0", hz=50)
+
+    await publisher.start()
+    for _ in range(5):
+        await publisher.start()
+
+    assert drone.offboard.started == 1, (
+        f"offboard entered {drone.offboard.started} times while it was already "
+        f"active; it should have been entered once"
+    )
+    await publisher.stop()
+
+
+async def test_re_entry_primes_setpoints_so_start_is_not_rejected():
+    """MAVSDK will not send the mode request unless a setpoint came first.
+
+    `OffboardImpl::start()` returns `NoSetpointSet` whenever its `_mode` is
+    `NotActive`, and only the `set_*` methods clear that -- `start()` never does.
+    A `stop()` therefore disarms the handshake, and re-entry has to re-arm it.
+
+    The first flight attempt at re-entry did not, and lost the race against its
+    own 20 Hz publisher by 35 ms:
+
+        15:33:31,548  the autopilot is in HOLD, not OFFBOARD - re-entering
+        15:33:31,563  could not re-enter OFFBOARD: No Setpoint Set
+
+    The publisher must prime explicitly rather than hope a stream tick lands in
+    the gap.
+    """
+    drone = FakeDrone()
+    publisher = SetpointPublisher(drone, "drone-0", hz=50)
+
+    await publisher.start()
+    drone.offboard.vehicle_mode = "LAND"  # the autopilot lands and leaves offboard
+
+    await publisher.start()
+
+    assert drone.offboard.start_rejections == 0, (
+        "re-entry called start() before pushing a setpoint, so MAVSDK rejected "
+        "it with NoSetpointSet and the drone stayed in HOLD"
+    )
+    assert drone.offboard.vehicle_mode == "OFFBOARD"
+    await publisher.stop()

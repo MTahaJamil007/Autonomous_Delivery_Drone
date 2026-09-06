@@ -138,30 +138,50 @@ blur, oblique viewing angles and lighting variation. Either alone is fragile.
 
 ### The quiet zone costs 20% of the budget — measured
 
-The table above is the width of the **plane**. The ArUco decoder only sees the
-black marker, and the pad textures carry a white quiet zone (which is the entire
-reason they decode at all — see F1 below). Measured on the shipped textures:
+The table above is the width of the **plane**. The ArUco decoder only ever sees
+a marker, and since the pads became a nested set there is no single marker width
+to quote — that is the point of them.
+
+> **Superseded.** This section described the original pad: one marker filling
+> 79.6% of a 2.0 m plane (199 px of a 250 px texture). That geometry is why the
+> pad became **undetectable below 2.52 m** — a marker that large outgrows a
+> 320×240 frame long before touchdown — and it is the root cause of the landing
+> failure this project spent a rewrite on. It is recorded here because the
+> measurement behind it, that the decoder sees the marker and not the plane it
+> is painted on, is still true and still load-bearing.
+
+The shipped pads carry **five markers at two scales**, and the authoritative
+budget lives in `world/pad_layout.py`:
+
+| id | side | position | in frame ≥ | decodes ≤ |
+| --- | --- | --- | --- | --- |
+| `p` | 0.40 m | (0.00, 0.00) | 0.69 m | 4.44 m |
+| `10p+10` / `10p+11` | 0.58 m | (∓0.65, 0.00) | 1.88 m | 6.43 m |
+| `10p+12` / `10p+13` | 0.58 m | (0.00, ∓0.65) | 2.51 m | 6.43 m |
+
+Print the live table, derived from the shipped geometry, with:
 
 ```
 $ python3 -c "
-import cv2
-img = cv2.imread('sim/models/pad_0/aruco_0.png')
-d = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50),
-                            cv2.aruco.DetectorParameters())
-print(d.detectMarkers(img)[0][0][0])"
-
-marker side 199 px of a 250 px texture  ->  79.6%
+import math, config, world.pad_layout as L
+tan_h = math.tan(config.CAMERA_HFOV_RAD / 2)
+tan_v = (config.CAMERA_HEIGHT_PX / 2) / config.CAMERA_FX_PX
+print(L.describe(config.CAMERA_FX_PX, tan_h, tan_v))"
 ```
 
-So `config.MARKER_QUIET_ZONE_FRACTION = 0.796`, and
-`config.decodable_px_at_altitude()` is the function to compare against
-`MARKER_MIN_DECODE_PX`:
+`scripts/preflight.py` re-derives the same numbers from the committed textures
+and fails if `SEARCH_ALT_M`, `COMMIT_ALT_M` or `NO_CLIMB_ALT_M` fall outside the
+band the pad actually supports.
 
-| Altitude | Plane | Decodable marker | 0.5 m pad, decodable |
-| --- | --- | --- | --- |
-| 10 m | 55.4 px | **44.1 px** | 11.0 px |
-| 6 m | 92.4 px | **73.5 px** | 18.4 px |
-| 3 m | 184.8 px | **147.1 px** | 36.8 px |
+### Calibrating the offset, not the pixels
+
+The landing loop no longer converts pixels to metres using an altitude. Each
+marker's real size is known, so `perception/pad_estimator.py` fits a homography
+from the marker's four pad-frame corners to its four image corners; the pad
+centre is that homography applied to (0, 0), and the Jacobian there is the local
+pixels-per-metre. Accuracy against rendered ground truth is **3–8 mm below 3 m**
+and 21 mm at 8 m, with range good to better than 1% below 6 m
+(`tests/test_pad_estimator.py`).
 
 **This correction strengthens F3 rather than weakening it.** On plane widths the
 original 0.5 m pad looked merely "marginal at 5 m" (27.7 px). Marker-corrected it

@@ -124,16 +124,16 @@ class SetpointPublisher:
         rejects the mode change outright. Priming first is not belt-and-braces;
         it is the documented handshake.
         """
-        from mavsdk.offboard import OffboardError, VelocityNedYaw
+        from mavsdk.offboard import OffboardError
 
         if self._task is not None:
+            # The stream is already up, but that does NOT mean the autopilot is
+            # still listening to it. See ensure_offboard.
             logger.debug("[%s] setpoint publisher already running", self._drone_id)
+            await self.ensure_offboard()
             return
 
-        zero = VelocityNedYaw(0.0, 0.0, 0.0, self.setpoint.yaw_deg)
-        for _ in range(max(3, int(self._hz * 0.25))):
-            await self._drone.offboard.set_velocity_ned(zero)
-            await asyncio.sleep(self._period_s)
+        await self._prime()
 
         try:
             await self._drone.offboard.start()
@@ -152,6 +152,136 @@ class SetpointPublisher:
             )
 
         self._task = asyncio.create_task(self._run(), name=f"setpoint-{self._drone_id}")
+
+    async def _prime(self) -> None:
+        """Push zero-velocity setpoints so PX4 will accept an OFFBOARD request.
+
+        Two separate reasons, and both are mandatory:
+
+        * PX4 rejects the mode change outright unless setpoints are already
+          arriving. This is the documented handshake, not belt-and-braces.
+        * MAVSDK will not even send the request. `OffboardImpl::start()` returns
+          `NoSetpointSet` when its `_mode` is `NotActive`, and `_mode` is set by
+          calling a `set_*` method -- never by `start()` itself. So after a
+          `stop()`, something must push a setpoint through the plugin's own API
+          before `start()` can do anything.
+
+        The second point is what broke the first re-entry attempt in flight. The
+        publishing task was streaming at 20 Hz, so a setpoint was never more
+        than 50 ms away -- but re-entry called `stop()` and `start()` 15 ms
+        apart and lost the race:
+
+            15:33:31,548  the autopilot is in HOLD, not OFFBOARD - re-entering
+            15:33:31,563  could not re-enter OFFBOARD: No Setpoint Set
+
+        Zero velocity, deliberately: a mode change is not the moment to also
+        start moving. The publishing task resumes sending the real setpoint on
+        its next tick.
+        """
+        from mavsdk.offboard import VelocityNedYaw
+
+        zero = VelocityNedYaw(0.0, 0.0, 0.0, self.setpoint.yaw_deg)
+        for _ in range(max(3, int(self._hz * 0.25))):
+            await self._drone.offboard.set_velocity_ned(zero)
+            await asyncio.sleep(self._period_s)
+
+    async def ensure_offboard(self) -> None:
+        """Re-enter OFFBOARD if the autopilot has left it behind our back.
+
+        THE BUG THIS FIXES: A MISSION THAT COULD ONLY EVER FLY ONE LEG
+        --------------------------------------------------------------
+        Touchdown is confirmed by commanding `action.land()` and waiting for a
+        real disarm, and that command necessarily takes PX4 OUT of offboard --
+        into Land, then Disarmed. The next leg then arms and takes off, which
+        leaves the vehicle in Takeoff/Hold. At no point does it come back.
+
+        `start()` used to return early whenever its publishing task was alive,
+        on the reasonable-sounding grounds that the publisher was already
+        running. It was: the setpoints were streaming at 20 Hz the whole time.
+        They were simply being ignored, because PX4 was not in offboard to
+        receive them. The drone climbed to its cruise altitude and hovered there
+        until the navigation timeout, having never moved horizontally:
+
+            15:08:53  at 9.6 m ... navigating to (30.031293, 72.314083)
+            15:11:53  still at x=24.85 y=-0.02 z=9.76     (three minutes later)
+
+        Leg 1 had always failed before the landing fixes landed, so no flight
+        had ever reached leg 2 and this had never been observable.
+
+        Public because `landing` needs it too: any code path that issues a land
+        command has taken the vehicle out of offboard and must put it back
+        before its next setpoint means anything.
+
+        WHY THIS ASKS TELEMETRY AND NOT `offboard.is_active()`
+        -----------------------------------------------------
+        Because `is_active()` does not answer this question. Its docstring says
+        "the vehicle is in offboard mode", but MAVSDK implements it as
+        `_mode != Mode::NotActive` over the plugin's OWN local state -- state
+        set by `start()` and cleared by `stop()`, and never touched when the
+        autopilot changes mode on its own. After a land command it therefore
+        still reports True, and a first version of this method believed it:
+
+            15:22:50  OFFBOARD engaged, streaming at 20 Hz      (leg 1)
+            15:24:16  at 9.6 m ... navigating to ...            (leg 2)
+            15:27:14  still parked over the pickup pad
+                      -- and not one "re-entered OFFBOARD" line in between
+
+        `telemetry.flight_mode()` comes from the vehicle's HEARTBEAT, so it
+        reports what PX4 is actually doing.
+
+        The same local state is why re-entry is `stop()` then `start()`.
+        MAVSDK's `start()` returns Success without sending anything when it
+        believes it is already active, so clearing that belief is the only way
+        to make the mode command go out at all.
+        """
+        from mavsdk.offboard import OffboardError
+
+        mode = None
+        try:
+            mode = await asyncio.wait_for(self._read_flight_mode(), timeout=5.0)
+        except Exception as exc:  # noqa: BLE001
+            # Not knowing is not a reason to skip. Fall through and re-enter:
+            # entering offboard when already in it costs one mode command.
+            logger.debug("[%s] could not read the flight mode: %s", self._drone_id, exc)
+
+        if mode == "OFFBOARD":
+            self._offboard_active = True
+            return
+
+        logger.info(
+            "[%s] the autopilot is in %s, not OFFBOARD - re-entering",
+            self._drone_id,
+            mode or "an unreadable mode",
+        )
+        try:
+            # Clear MAVSDK's stale local state so that start() actually sends
+            # the mode command instead of short-circuiting to Success.
+            await asyncio.wait_for(self._drone.offboard.stop(), timeout=5.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[%s] offboard.stop() before re-entry: %s", self._drone_id, exc)
+        self._offboard_active = False
+
+        # Re-arm the handshake. Without this, start() returns NoSetpointSet.
+        await self._prime()
+
+        try:
+            await asyncio.wait_for(self._drone.offboard.start(), timeout=5.0)
+            self._offboard_active = True
+            logger.info("[%s] re-entered OFFBOARD", self._drone_id)
+        except (OffboardError, asyncio.TimeoutError) as exc:
+            detail = getattr(getattr(exc, "_result", None), "result_str", exc)
+            logger.error(
+                "[%s] could not re-enter OFFBOARD: %s. The setpoint stream is "
+                "still running but the drone will not follow it.",
+                self._drone_id,
+                detail,
+            )
+
+    async def _read_flight_mode(self) -> str:
+        """One sample of the vehicle's actual flight mode, as a bare name."""
+        async for mode in self._drone.telemetry.flight_mode():
+            return str(mode).rsplit(".", 1)[-1]
+        return "UNKNOWN"
 
     async def stop(self) -> None:
         """Stop publishing and leave OFFBOARD. Call once, at mission end.

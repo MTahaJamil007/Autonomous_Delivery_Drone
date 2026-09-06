@@ -1,10 +1,10 @@
-"""P4 acceptance: the three reasons precision landing never worked.
+"""Unit-level properties of the landing control law and its constants.
 
-The 20-landing statistical criterion needs a simulator and lives in
-docs/ACCEPTANCE.md as a scripted procedure. What is provable here is that the
-control law itself is now sound: altitude-invariant gain (F4), a marker large
-enough to decode at the altitude it is searched from (F3), a decodable pad (F1),
-and a descent that cannot proceed while badly off-centre.
+These are pure-function checks. They are necessary and they are NOT sufficient:
+an earlier version of this file passed in full while the drone could not land,
+because a controller's behaviour lives in the loop, not in any one function. The
+loop is exercised in tests/test_landing_closed_loop.py and the perception it
+depends on in tests/test_pad_estimator.py. Read all three as one suite.
 """
 
 import math
@@ -13,113 +13,170 @@ from pathlib import Path
 import pytest
 
 import config
-from drone_agent import landing
+from drone_agent import geo, landing
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  F4: altitude-invariant control
+#  Metric measurement: the gain is altitude-invariant because the MEASUREMENT is
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_effective_loop_gain_is_altitude_invariant():
-    """THE F4 FIX, stated as a test.
+def test_the_controller_never_multiplies_error_by_altitude():
+    """Two generations of fix are visible in this one property.
 
-    A pixel-proportional controller has effective gain K_p * fx / h, which rises
-    tenfold between 10 m and 1 m:
+    The first converted pixels to metres with `err_px * altitude / fx`, which
+    made the loop gain altitude-invariant but tied every measurement to a
+    drifting EKF altitude. The second removed altitude from the measurement path
+    entirely: perception.pad_estimator recovers scale from each marker's own
+    known size, so the offset arrives already in metres and the gain is simply a
+    constant.
 
-        h = 10 m -> 0.42 1/s   sluggish but stable
-        h =  1 m -> 4.16 1/s   overshoot and oscillation, at touchdown
-
-    Converting to metres first makes the gain a property of the controller.
+    Stated as a test: for one real ground offset, the commanded velocity is the
+    same number at every altitude.
     """
-    ground_offset_m = 0.5  # the same real error at every altitude
+    ground_offset_m = 0.5
 
     commands = []
-    for altitude_m in (10.0, 5.0, 3.0, 1.0, 0.5):
-        # What the camera would report for this real offset.
-        err_px = ground_offset_m * config.CAMERA_FX_PX / altitude_m
-        recovered_m = landing.pixel_to_ground_offset_m(err_px, altitude_m)
-        assert recovered_m == pytest.approx(ground_offset_m, rel=1e-6), (
-            "pixel -> metre conversion must be exact"
-        )
+    for px_per_m in (46.2, 92.4, 138.6, 277.2, 554.4):  # 6 m down to 0.5 m
+        err_px = ground_offset_m * px_per_m
+        recovered_m = err_px / px_per_m
+        assert recovered_m == pytest.approx(ground_offset_m, rel=1e-9)
         commands.append(config.LANDING_K_P * recovered_m)
 
-    assert max(commands) - min(commands) < 1e-6, (
+    assert max(commands) - min(commands) < 1e-9, (
         f"the command for a fixed ground offset must not depend on altitude, got {commands}"
     )
 
-    # And demonstrate the failure it replaces.
-    old_gain = 0.015
-    old_effective = [old_gain * config.CAMERA_FX_PX / h for h in (10.0, 1.0)]
-    assert old_effective[1] / old_effective[0] == pytest.approx(10.0, rel=1e-6), (
-        "the old controller's gain really did rise 10x on the way down"
-    )
+    # And the failure it replaces: a gain proportional to pixels rose tenfold on
+    # the way down, peaking exactly at touchdown.
+    old_pixel_gain = 0.015
+    old_effective = [old_pixel_gain * config.CAMERA_FX_PX / h for h in (10.0, 1.0)]
+    assert old_effective[1] / old_effective[0] == pytest.approx(10.0, rel=1e-6)
 
 
-def test_offset_conversion_is_clamped_near_the_ground():
-    """Below a few centimetres the projection is degenerate.
+def test_a_nonsense_scale_is_rejected_rather_than_divided_by():
+    drone_state = {"alt": 3.0}
+    for bad_scale in (0.0, -12.0):
+        vision = {"pads": [{"pad_id": 0, "err_x": 10.0, "err_y": 5.0, "px_per_m": bad_scale}]}
+        assert landing.observe_pad(vision, 0, drone_state) is None
 
-    Without a clamp, altitude -> 0 makes the recovered offset -> 0 and the
-    controller stops correcting at exactly the wrong moment; with a naive
-    reciprocal it would instead explode.
+
+def test_a_frame_whose_markers_disagree_is_dropped():
+    """Steering on the average of a good and a bad measurement is worse than coasting."""
+    drone_state = {"alt": 3.0}
+    base = {"pad_id": 0, "err_x": 10.0, "err_y": 5.0, "px_per_m": 90.0, "range_m": 3.0}
+
+    ok = dict(base, residual_m=config.MAX_MEASUREMENT_RESIDUAL_M * 0.5)
+    assert landing.observe_pad({"pads": [ok]}, 0, drone_state) is not None
+
+    bad = dict(base, residual_m=config.MAX_MEASUREMENT_RESIDUAL_M * 2.0)
+    assert landing.observe_pad({"pads": [bad]}, 0, drone_state) is None
+
+
+def test_the_wrong_pad_is_never_returned():
+    """Three pads stand within metres of each other; the filter is the whole of
+    marker disambiguation."""
+    drone_state = {"alt": 3.0}
+    vision = {
+        "pads": [
+            {"pad_id": 1, "err_x": 5.0, "err_y": 0.0, "px_per_m": 90.0, "range_m": 3.0},
+            {"pad_id": 2, "err_x": -80.0, "err_y": 20.0, "px_per_m": 90.0, "range_m": 3.0},
+        ]
+    }
+    assert landing.observe_pad(vision, 0, drone_state) is None
+    assert landing.observe_pad(vision, 1, drone_state) is not None
+    assert landing.observe_pad(vision, 2, drone_state) is not None
+
+
+def test_range_comes_from_the_marker_but_defers_to_the_ekf_when_absurd():
+    """The vision range beats the EKF altitude -- until it is obviously wrong.
+
+    It is better because it measures height above the PAD rather than above
+    wherever the drone took off, and because it is good to better than one
+    percent. It is not trusted blindly, because a bad decode could report
+    anything and the autopilot's estimate has redundant sensors behind it.
     """
-    assert landing.pixel_to_ground_offset_m(100.0, 0.0) == pytest.approx(
-        landing.pixel_to_ground_offset_m(100.0, 0.15)
-    )
-    assert math.isfinite(landing.pixel_to_ground_offset_m(100.0, -5.0))
+    drone_state = {"alt": 3.0}
+
+    assert landing.working_height_m({"range_m": 3.1}, drone_state) == pytest.approx(3.1)
+    assert landing.working_height_m({"range_m": 40.0}, drone_state) == pytest.approx(3.0)
+    assert landing.working_height_m(None, drone_state) == pytest.approx(3.0)
 
 
-def test_pixel_to_metre_rejects_a_nonsense_focal_length():
-    with pytest.raises(ValueError):
-        landing.pixel_to_ground_offset_m(10.0, 5.0, fx_px=0.0)
+# ─────────────────────────────────────────────────────────────────────────────
+#  Camera mount: signs and tilt
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_body_frame_signs_match_the_derived_camera_mount():
-    """F6: the mount is pose 0 0 -0.05 0 1.5708 0, a +90 degree pitch about Y.
+    """The mount is a +90 degree pitch about Y, so image u is body RIGHT and
+    image v is body AFT (docs/CALIBRATION.md).
 
-    Gazebo cameras look down +X with image right = -Y and image down = -Z, so
-    after the rotation: image u (right) -> body right, image v (down) -> body
-    aft. A marker below centre is BEHIND the drone.
-
-    These signs are easy to "fix" into a positive feedback loop that flies away
-    from the pad, so they are pinned here and in docs/CALIBRATION.md.
+    Inverting either sign turns the controller into positive feedback that flies
+    away from the pad, so it is worth pinning explicitly.
     """
-    altitude_m = 5.0
-
-    # Marker below image centre (positive err_y) -> it is behind us -> fly back.
-    forward_m, right_m = landing.metric_offsets({"err_x": 0.0, "err_y": 50.0}, altitude_m)
-    assert forward_m < 0, "a marker below centre must command backward motion"
+    # A pad below the image centre (+v) is BEHIND the drone: close on it by
+    # flying backwards.
+    forward_m, right_m = landing.body_offsets_m(0.0, 0.4)
+    assert forward_m < 0.0, "a pad low in the image is aft; forward must be negative"
     assert right_m == pytest.approx(0.0)
 
-    # Marker right of centre (positive err_x) -> it is to our right -> fly right.
-    forward_m, right_m = landing.metric_offsets({"err_x": 50.0, "err_y": 0.0}, altitude_m)
-    assert right_m > 0, "a marker right of centre must command rightward motion"
+    # A pad right of the image centre (+u) is to the drone's right.
+    forward_m, right_m = landing.body_offsets_m(0.4, 0.0)
+    assert right_m > 0.0
     assert forward_m == pytest.approx(0.0)
 
-    # Magnitudes are symmetric.
-    assert abs(
-        landing.metric_offsets({"err_x": 0, "err_y": -50.0}, altitude_m)[0]
-    ) == pytest.approx(abs(forward_m) if forward_m else 50.0 * altitude_m / config.CAMERA_FX_PX)
+    # Magnitudes pass through untouched: this is a relabelling, not a scaling.
+    forward_m, right_m = landing.body_offsets_m(0.3, -0.2)
+    assert abs(forward_m) == pytest.approx(0.2)
+    assert abs(right_m) == pytest.approx(0.3)
 
 
-def test_ema_filters_the_measurement_not_the_command():
-    """Filtering the output adds actuator lag without denoising the sensor."""
-    noisy = [(1.0, 0.0, 0.0), (-1.0, 0.0, 0.0)] * 25
-    ema = landing.EMAFilter(alpha=0.3)
-    filtered = [ema.update(sample)[0] for sample in noisy]
+def test_tilt_correction_moves_the_target_the_right_way():
+    """A tilted airframe swings a rigidly-mounted camera off nadir.
 
-    raw_variance = sum(x[0] ** 2 for x in noisy[-20:]) / 20
-    filtered_variance = sum(x**2 for x in filtered[-20:]) / 20
-    assert filtered_variance < raw_variance * 0.5, (
-        f"the filter must materially reduce variance: {raw_variance:.3f} -> {filtered_variance:.3f}"
+    Sanity check at roll = +90 degrees (right wing straight down): the optical
+    axis, body +Z, swings to the world horizon on the LEFT, so the point
+    directly below the drone lies a quarter turn away toward body +Y -- far off
+    to the image right. tan(roll) diverging positive is exactly that.
+    """
+    assert landing.nadir_offset_px(0.0, 0.0) == (pytest.approx(0.0), pytest.approx(0.0))
+
+    u_px, v_px = landing.nadir_offset_px(10.0, 0.0)
+    assert u_px > 0.0, "rolling right puts nadir to the image right"
+    assert v_px == pytest.approx(0.0, abs=1e-9)
+
+    u_px, v_px = landing.nadir_offset_px(0.0, 10.0)
+    assert v_px > 0.0, "pitching nose-up puts nadir aft, which is +v in this mount"
+    assert u_px == pytest.approx(0.0, abs=1e-9)
+
+    # Magnitude is fx * tan(tilt).
+    u_px, _ = landing.nadir_offset_px(5.0, 0.0)
+    assert u_px == pytest.approx(config.CAMERA_FX_PX * math.tan(math.radians(5.0)))
+
+    # Which at 6 m is a 0.52 m ground error -- twice CENTERED_M. That is why
+    # this correction exists rather than being a refinement.
+    assert 6.0 * math.tan(math.radians(5.0)) > 2.0 * config.CENTERED_M
+
+    # Extreme attitudes are clamped, not allowed to diverge through tan().
+    assert abs(landing.nadir_offset_px(89.0, 89.0)[0]) < 20.0 * config.CAMERA_FX_PX
+
+
+def test_tilt_correction_is_applied_only_when_attitude_is_known():
+    """Absent attitude must mean NO correction -- not a correction computed from
+    a fabricated level attitude, and not a crash."""
+    vision = {
+        "fx": config.CAMERA_FX_PX,
+        "pads": [{"pad_id": 0, "err_x": 20.0, "err_y": 0.0, "px_per_m": 100.0, "range_m": 2.8}],
+    }
+
+    without = landing.observe_pad(vision, 0, {"alt": 2.8})
+    assert without is not None and without["tilt_corrected"] is False
+
+    with_attitude = landing.observe_pad(vision, 0, {"alt": 2.8, "roll_deg": 6.0, "pitch_deg": 0.0})
+    assert with_attitude is not None and with_attitude["tilt_corrected"] is True
+    assert with_attitude["right_m"] != pytest.approx(without["right_m"]), (
+        "a 6 degree roll must actually move the commanded target"
     )
-
-
-def test_ema_reset_discards_a_stale_lock():
-    """A reacquired marker must not be averaged with where it was seconds ago."""
-    ema = landing.EMAFilter()
-    ema.update((5.0, 5.0, 0.0))
-    ema.reset()
-    assert ema.update((0.0, 0.0, 0.0)) == (0.0, 0.0, 0.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -127,92 +184,74 @@ def test_ema_reset_discards_a_stale_lock():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_the_pad_is_decodable_at_the_altitude_it_is_searched_from():
-    """F3: a 0.5 m pad spans 14 px at cruise altitude and cannot be decoded.
+def test_the_search_altitude_sits_inside_the_pads_visible_band():
+    """The search must fly where the pad can actually be seen.
 
-    The documented flow -- arrive at TARGET_ALT, then search -- therefore could
-    not lock even with a decodable texture. Both levers are applied: a 2 m pad
-    AND a descent to SEARCH_ALT_M before searching.
-
-    Compared against decodable_px_at_altitude(), not the raw plane width: the
-    quiet zone means the decoder only ever sees about 80% of the pad, so
-    comparing the plane width overstates the margin by that much.
+    The original defect at cruise altitude was the mirror image of the one that
+    produced the hover: a 0.5 m marker spans 14 px at 10 m and cannot be
+    decoded, so the documented "arrive at TARGET_ALT, then search" could never
+    lock on. The nested pad answers both ends at once -- the outer ring reaches
+    up, the centre marker reaches down.
     """
-    at_search_alt = config.decodable_px_at_altitude(config.SEARCH_ALT_M)
-    assert at_search_alt >= config.MARKER_MIN_DECODE_PX * 2.0, (
-        f"a {config.PAD_SIZE_M} m pad presents {at_search_alt:.0f} px of decodable "
-        f"marker at {config.SEARCH_ALT_M} m; want at least 2x the "
-        f"{config.MARKER_MIN_DECODE_PX:.0f} px threshold for margin"
+    import world.pad_layout as pad_layout
+
+    tan_h = math.tan(config.CAMERA_HFOV_RAD / 2.0)
+    tan_v = (config.CAMERA_HEIGHT_PX / 2.0) / config.CAMERA_FX_PX
+    low_m, high_m = pad_layout.coverage_m(config.CAMERA_FX_PX, tan_h, tan_v)
+
+    assert low_m < config.SEARCH_ALT_M <= high_m, (
+        f"SEARCH_ALT_M {config.SEARCH_ALT_M} m must sit inside the pad's "
+        f"{low_m:.2f}-{high_m:.2f} m visible band"
     )
 
-    # Reproduce the plan's plane-width figure for the pad this replaces.
+    # And the band must cover the whole descent, with no hole in the middle --
+    # coverage_m() raises on a gap, so reaching here is already the assertion.
+    assert low_m <= config.COMMIT_ALT_M, (
+        "the commit must begin at or above the vision floor, not below it"
+    )
+
+
+def test_the_original_half_metre_pad_was_undecodable_at_every_search_altitude():
+    """The counter-example the pad size was changed to escape.
+
+    Uses explicit legacy geometry rather than config, because config no longer
+    describes a single-marker pad and a test that quietly followed it would stop
+    testing anything.
+    """
+    legacy_marker_fraction = 0.796  # the old texture: marker / plane
+
+    for altitude_m in (config.TARGET_ALT_M, config.SEARCH_ALT_M, 5.0):
+        decodable_px = config.marker_px_at_altitude(altitude_m, 0.5) * legacy_marker_fraction
+        assert decodable_px < config.MARKER_MIN_DECODE_PX, (
+            f"the original 0.5 m pad presents {decodable_px:.1f} px at "
+            f"{altitude_m} m and should be undecodable"
+        )
+
     assert config.marker_px_at_altitude(config.TARGET_ALT_M, 0.5) == pytest.approx(13.9, abs=0.1)
 
-    # Marker-corrected, the original pad is undecodable at EVERY altitude the
-    # mission would have searched from - not merely "marginal at 5 m" as the
-    # plane-width figures suggested.
-    for altitude_m in (config.TARGET_ALT_M, config.SEARCH_ALT_M, 5.0):
-        assert config.decodable_px_at_altitude(altitude_m, 0.5) < config.MARKER_MIN_DECODE_PX, (
-            f"the original 0.5 m pad should be undecodable at {altitude_m} m"
-        )
 
-    # The shipped pad clears the threshold even at full cruise altitude, which is
-    # what gives the search phase its margin.
-    assert config.decodable_px_at_altitude(config.TARGET_ALT_M) > config.MARKER_MIN_DECODE_PX
+def test_the_flight_measurement_that_calibrated_the_apparent_size_model():
+    """The one in-flight measurement taken during this work, preserved.
 
+    At 5.51 m over the ORIGINAL pad_0 -- a 2.0 m plane carrying a single marker
+    at 0.796 of its width -- the live vision bridge reported 88.6 px. The
+    plane-width prediction was 100.6 px and the marker-corrected prediction
+    80.1 px, so the measurement sat between them and nearer the corrected
+    figure. That is what established that the decoder sees the MARKER, not the
+    plane it is painted on.
 
-def test_quiet_zone_fraction_matches_the_shipped_texture():
-    """config.MARKER_QUIET_ZONE_FRACTION is a measurement, so measure it.
-
-    The pad textures carry a white quiet zone - the whole reason they decode at
-    all (finding F1) - so the black marker is smaller than the plane it is
-    painted on. If a texture is regenerated without that border, or with a
-    different one, the apparent-size budget silently shifts.
-    """
-    import cv2
-
-    project_root = Path(__file__).resolve().parents[1]
-    detector = cv2.aruco.ArucoDetector(
-        cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50),
-        cv2.aruco.DetectorParameters(),
-    )
-
-    for index in (0, 1, 2):
-        texture = project_root / "sim" / "models" / f"pad_{index}" / f"aruco_{index}.png"
-        image = cv2.imread(str(texture))
-        assert image is not None, f"{texture} unreadable"
-
-        corners, ids, _ = detector.detectMarkers(image)
-        assert ids is not None, f"pad_{index} texture does not decode (finding F1)"
-        assert index in ids.flatten().tolist()
-
-        points = corners[0][0]
-        sides = [float(((points[i] - points[(i + 1) % 4]) ** 2).sum() ** 0.5) for i in range(4)]
-        fraction = (sum(sides) / 4.0) / image.shape[1]
-
-        assert fraction == pytest.approx(config.MARKER_QUIET_ZONE_FRACTION, abs=0.03), (
-            f"pad_{index}: the marker occupies {fraction:.3f} of the texture but "
-            f"config.MARKER_QUIET_ZONE_FRACTION says "
-            f"{config.MARKER_QUIET_ZONE_FRACTION}. The apparent-size budget "
-            f"depends on this ratio."
-        )
-
-
-def test_flight_measured_marker_size_matches_the_corrected_budget():
-    """Pins the one in-flight measurement taken during this remediation.
-
-    At 5.51 m over pad_0, the live vision bridge reported 88.6 px. The
-    plane-width prediction was 100.6 px; the marker-corrected prediction was
-    80.1 px. The measurement sits between them and much nearer the corrected
-    figure, which is why decodable_px_at_altitude() exists. Recorded as a test
-    so that a future change to the intrinsics or the pad has to confront a real
-    observation rather than only the arithmetic.
+    The pad has since been replaced, so this is history rather than a live
+    budget -- but it is the empirical basis for correcting apparent size by the
+    marker fraction at all, which world.pad_layout still does via
+    QUIET_ZONE_FRACTION. Kept so that a future change to the intrinsics has to
+    confront a real observation and not only arithmetic.
     """
     altitude_m = 5.51
     measured_px = 88.6
+    legacy_marker_fraction = 0.796
 
     plane_px = config.marker_px_at_altitude(altitude_m)
-    marker_px = config.decodable_px_at_altitude(altitude_m)
+    marker_px = plane_px * legacy_marker_fraction
 
     assert marker_px < measured_px < plane_px * 1.05, (
         f"measured {measured_px} px should sit between the marker-corrected "
@@ -221,6 +260,70 @@ def test_flight_measured_marker_size_matches_the_corrected_budget():
     assert abs(measured_px - marker_px) < abs(measured_px - plane_px), (
         "the measurement should sit closer to the marker-corrected prediction"
     )
+
+
+def test_the_shipped_textures_carry_the_layout_they_claim():
+    """Read every shipped pad texture back through the real detector.
+
+    Generating a texture that does not decode is finding F1 all over again --
+    the original defect was precisely an asset that looked right and decoded in
+    zero dictionaries. world/build_pads.py verifies at generation time; this
+    verifies what is actually committed, which is the thing that flies.
+    """
+    import cv2
+
+    import world.pad_layout as pad_layout
+
+    project_root = Path(__file__).resolve().parents[1]
+    detector = cv2.aruco.ArucoDetector(
+        cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, pad_layout.ARUCO_DICTIONARY)),
+        cv2.aruco.DetectorParameters(),
+    )
+
+    for index in range(pad_layout.PAD_COUNT):
+        texture = project_root / "sim" / "models" / f"pad_{index}" / f"pad_{index}.png"
+        image = cv2.imread(str(texture), cv2.IMREAD_GRAYSCALE)
+        assert image is not None, f"{texture} missing -- run `python3 -m world.build_pads`"
+
+        corners, ids, _ = detector.detectMarkers(image)
+        assert ids is not None, f"pad_{index} texture does not decode at all (finding F1)"
+
+        found = set(ids.flatten().tolist())
+        expected = {m.marker_id for m in pad_layout.pad_markers(index)}
+        assert found >= expected, (
+            f"pad_{index} texture decodes {sorted(found)} but the layout declares "
+            f"{sorted(expected)}. Regenerate with `python3 -m world.build_pads`."
+        )
+
+        # And the drawn sizes must match the declared geometry, because the
+        # estimator's metric scale comes from a marker's known side length.
+        pixels_per_m = image.shape[0] / pad_layout.PAD_SIZE_M
+        by_id = {int(i): c[0] for c, i in zip(corners, ids.flatten(), strict=True)}
+        for marker in pad_layout.pad_markers(index):
+            points = by_id[marker.marker_id]
+            sides = [float(((points[i] - points[(i + 1) % 4]) ** 2).sum() ** 0.5) for i in range(4)]
+            drawn_m = (sum(sides) / 4.0) / pixels_per_m
+            assert drawn_m == pytest.approx(marker.side_m, abs=0.02), (
+                f"pad_{index} marker {marker.marker_id} is drawn {drawn_m:.3f} m "
+                f"across but the layout says {marker.side_m:.3f} m. Every metric "
+                f"offset the estimator reports is scaled by this."
+            )
+
+
+def test_the_old_single_marker_textures_are_gone():
+    """The undecodable-at-low-altitude asset must not linger.
+
+    A stale aruco_N.png left beside the new one is an invitation for an
+    <albedo_map> reference to quietly resurrect the pad that could not be seen
+    below 2.5 m.
+    """
+    project_root = Path(__file__).resolve().parents[1]
+    for index in range(3):
+        legacy = project_root / "sim" / "models" / f"pad_{index}" / f"aruco_{index}.png"
+        assert not legacy.exists(), (
+            f"{legacy} is the old single-marker texture and must be removed; "
+            f"run `python3 -m world.build_pads`"
+        )
 
 
 def test_search_altitude_is_below_cruise_so_a_descent_actually_happens():
@@ -278,29 +381,87 @@ def test_the_model_declares_no_absolute_sensor_topic():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_the_descent_cone_narrows_with_altitude():
-    """A lateral error tolerable at 8 m is a miss at 0 m.
-
-    The old loop descended at 0.4 m/s regardless of centring, so an 8 m-altitude
-    error arrived intact at the ground.
-    """
-    limits = [landing.descent_cone_limit_m(h) for h in (8.0, 4.0, 2.0, 1.0, 0.3)]
-    assert limits == sorted(limits, reverse=True), "the cone must narrow"
-    assert limits[-1] < 0.3, f"the final gate must be tight, got {limits[-1]:.2f} m"
+def test_the_descent_gate_narrows_with_altitude():
+    """A lateral error tolerable at 8 m is a miss at 0 m."""
+    limits = [landing.descent_gate_limit_m(h) for h in (8.0, 4.0, 2.0, 1.0, 0.3)]
+    assert limits == sorted(limits, reverse=True), "the gate must narrow"
+    assert limits[-1] < 0.35, f"the final gate must be tight, got {limits[-1]:.2f} m"
     assert limits[0] > 1.0, "and generous high up, or the drone never descends"
 
 
-def test_being_outside_the_cone_blocks_the_descent():
-    """The gate must actually exclude a real off-centre case."""
-    altitude_m = 2.0
-    limit_m = landing.descent_cone_limit_m(altitude_m)
-    assert 0.5 * limit_m < limit_m  # inside
-    assert 2.0 * limit_m > limit_m  # outside
+def test_the_descent_gate_has_a_floor_it_cannot_go_below():
+    """The difference between a gate and a deadlock.
 
-    # A 1 m offset at 2 m altitude must be outside the gate.
-    assert 1.0 > limit_m, (
-        f"1 m off-centre at 2 m altitude must block the descent (limit {limit_m:.2f} m)"
+    A limit that keeps shrinking eventually demands better centring than the
+    measurement noise allows, and then it never opens again -- the drone holds a
+    perfect lock and simply stops descending. The floor is what makes the gate
+    always satisfiable.
+    """
+    for altitude_m in (0.0, 0.05, 0.1, 0.5, 2.0, 10.0):
+        assert landing.descent_gate_limit_m(altitude_m) >= config.DESCENT_ACCEPT_FLOOR_M
+
+    # And the floor is well clear of the measured 3-21 mm measurement error.
+    assert config.DESCENT_ACCEPT_FLOOR_M > 8.0 * 0.021
+
+
+def test_being_outside_the_gate_blocks_the_descent():
+    altitude_m = 2.0
+    limit_m = landing.descent_gate_limit_m(altitude_m)
+
+    assert landing.should_descend(0.5 * limit_m, altitude_m, currently_descending=False)
+    assert not landing.should_descend(3.0 * limit_m, altitude_m, currently_descending=False)
+
+    # A 1 m offset at 2 m altitude must block the descent.
+    assert not landing.should_descend(1.0 + limit_m, altitude_m, currently_descending=False)
+
+
+def test_the_gate_has_hysteresis_so_it_cannot_chatter():
+    """A descent that starts and stops at 10 Hz is a hover with extra steps."""
+    altitude_m = 2.0
+    limit_m = landing.descent_gate_limit_m(altitude_m)
+    marginal_m = limit_m * 1.2  # just outside the entry limit
+
+    assert not landing.should_descend(marginal_m, altitude_m, currently_descending=False), (
+        "must not START descending outside the entry limit"
     )
+    assert landing.should_descend(marginal_m, altitude_m, currently_descending=True), (
+        "but must not immediately STOP for the same offset once descending"
+    )
+    assert config.DESCENT_EXIT_HYSTERESIS > 1.0
+
+
+def test_the_loop_never_climbs_below_the_no_climb_altitude():
+    """The structural fix for the reported hover.
+
+    Losing the pad low down is what the field of view does, not an emergency.
+    Answering it with a climb restores the lock, which permits another descent,
+    which loses it again.
+    """
+    assert not landing.may_climb(config.NO_CLIMB_ALT_M - 0.01)
+    assert not landing.may_climb(0.5)
+    assert landing.may_climb(config.NO_CLIMB_ALT_M + 0.01)
+
+    # And it must cover the whole band where losing the pad is normal: measured
+    # lock loss was 2.52 m centred and 3.42 m with 8 degrees of tilt.
+    assert config.NO_CLIMB_ALT_M >= 2.6
+
+
+def test_the_altitude_ratchet_makes_a_landing_monotonic():
+    """Whatever else misbehaves, the drone cannot walk back up."""
+    ratchet = landing.AltitudeRatchet()
+    for altitude_m in (6.0, 5.0, 4.0, 3.0, 2.0):
+        ratchet.observe(altitude_m)
+
+    assert ratchet.lowest_m == pytest.approx(2.0)
+    assert ratchet.ceiling_m == pytest.approx(2.0 + config.ALTITUDE_FLOOR_HYSTERESIS_M)
+
+    # A climb command below the ceiling is allowed (a real descent overshoots
+    # and settles, and pinning it at its lowest noisy sample would be worse).
+    assert ratchet.limit_climb(2.1, -0.3) == pytest.approx(-0.3)
+    # At or above the ceiling it is refused.
+    assert ratchet.limit_climb(2.5, -0.3) == 0.0
+    # Descents are never touched.
+    assert ratchet.limit_climb(2.5, 0.4) == pytest.approx(0.4)
 
 
 def test_descent_rate_slows_toward_touchdown():
@@ -308,7 +469,11 @@ def test_descent_rate_slows_toward_touchdown():
     assert rates == sorted(rates, reverse=True), f"descent must slow: {rates}"
     assert rates[0] == config.DESCENT_VZ_HIGH_M_S
     assert rates[-1] == config.DESCENT_VZ_FINAL_M_S
-    assert rates[-1] < 0.2, "the last stretch must be gentle"
+    assert rates[-1] <= 0.25, (
+        "the last stretch must be gentle -- but not so slow that the drone hangs "
+        "above the ground never satisfying PX4's land detector, which needs "
+        "sustained ground contact to latch"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -316,19 +481,60 @@ def test_descent_rate_slows_toward_touchdown():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_touchdown_prefers_the_autopilots_landed_state():
-    """LandedState fuses altitude, vertical velocity and thrust."""
+def test_touchdown_trusts_the_autopilots_on_ground_at_any_altitude():
+    """ON_GROUND is authoritative, because LandedState fuses altitude, vertical
+    velocity and thrust -- so it can report a touchdown on raised ground that
+    the height threshold alone would miss."""
     assert landing.is_on_ground({"landed_state": "ON_GROUND", "alt": 0.8})
-    assert not landing.is_on_ground({"landed_state": "IN_AIR", "alt": 0.05}), (
-        "an explicit IN_AIR must override a noisy low altitude sample"
+
+
+def test_in_air_does_not_veto_a_low_height_because_offboard_suppresses_it():
+    """The regression that cost a live landing.
+
+    THE FLIGHT. The controller flew the descent perfectly and then threw the
+    result away:
+
+        14:56:27  committing to the landing from 1.17 m, 0.042 m off centre
+        14:56:39  commit did not reach the ground within 12 s (still -0.03 m up)
+
+    Gazebo ground truth had the drone stopped on the pad, 0.12 m from its
+    centre. Its own height reading was -0.03 m. It returned STALLED, the leg
+    failed, and the mission was recorded FAILED.
+
+    THE CAUSE. is_on_ground let an explicit IN_AIR veto the height check. That
+    looks prudent -- the autopilot ought to know better than one noisy sample --
+    but it is a guaranteed deadlock during the commit, because PX4's land
+    detector requires sustained low thrust and near-zero velocity and the commit
+    streams a 0.2 m/s DOWNWARD VELOCITY SETPOINT IN OFFBOARD until touchdown.
+    The detector will not declare a landing while it is being commanded to fly,
+    so LandedState stays IN_AIR straight through the ground. The veto therefore
+    fired precisely when the height was the only signal left, and never when a
+    sample was actually noisy.
+
+    Noise rejection now lives where it can do the job without deadlocking: both
+    callers require the condition to hold for config.TOUCHDOWN_PUSH_S and then
+    confirm by commanding a land and waiting for a real disarm.
+    """
+    assert landing.is_on_ground({"landed_state": "IN_AIR", "alt": -0.03}), (
+        "the exact state of the failed flight: on the ground, reported IN_AIR"
     )
-    assert not landing.is_on_ground({"landed_state": "LANDING", "alt": 0.1})
+    assert landing.is_on_ground({"landed_state": "LANDING", "alt": 0.1})
+
+    # Still not on the ground merely because the autopilot has not said so.
+    assert not landing.is_on_ground({"landed_state": "IN_AIR", "alt": 4.0})
+    assert not landing.is_on_ground({"landed_state": "TAKING_OFF", "alt": 1.0})
 
 
 def test_touchdown_falls_back_to_altitude_when_landed_state_is_absent():
-    assert landing.is_on_ground({"alt": 0.2})
+    below_m = config.TOUCHDOWN_ALT_M * 0.5
+    assert landing.is_on_ground({"alt": below_m})
     assert not landing.is_on_ground({"alt": 3.0})
     assert not landing.is_on_ground({}), "an unknown altitude must not read as landed"
+
+    # The height may also be supplied explicitly, because the loop prefers the
+    # vision range -- height above the PAD -- to the EKF's height above home.
+    assert landing.is_on_ground({}, height_m=below_m)
+    assert not landing.is_on_ground({}, height_m=1.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -413,3 +619,105 @@ def test_select_target_never_returns_the_wrong_marker():
 
     assert landing.select_target(detections, 3) is None
     assert landing.select_target([], 0) is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Holding station through the open-loop commit
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_commit_hold_does_nothing_when_the_drone_has_not_drifted():
+    """Inside the deadband there is nothing to correct.
+
+    The deadband is roughly the EKF's own horizontal noise. Correcting inside it
+    would be steering on the estimator rather than on the drone.
+    """
+    assert landing.commit_hold_velocity(30.0315, 72.3140, 30.0315, 72.3140) == (0.0, 0.0)
+
+    # A drift comfortably smaller than the deadband, expressed in degrees.
+    tiny_deg = (config.COMMIT_HOLD_DEADBAND_M * 0.4) / 111320.0
+    assert landing.commit_hold_velocity(30.0315 + tiny_deg, 72.3140, 30.0315, 72.3140) == (
+        0.0,
+        0.0,
+    )
+
+
+def test_commit_hold_flies_back_toward_the_spot_it_committed_from():
+    """The sign that makes this a correction rather than an escape.
+
+    Drifting NORTH of the commit point must command a SOUTHWARD velocity, and
+    drifting EAST must command WESTWARD. Getting either backwards turns the last
+    metre of every landing into positive feedback, with no vision left to notice.
+    """
+    north_deg = 0.30 / 111320.0
+    north_cmd, east_cmd = landing.commit_hold_velocity(
+        30.0315 + north_deg, 72.3140, 30.0315, 72.3140
+    )
+    assert north_cmd < 0.0, f"drifted north, so it must fly south; got {north_cmd:+.3f}"
+    assert abs(east_cmd) < 1e-6
+
+    east_deg = 0.30 / geo.metres_per_deg_lon(30.0315)
+    north_cmd, east_cmd = landing.commit_hold_velocity(
+        30.0315, 72.3140 + east_deg, 30.0315, 72.3140
+    )
+    assert east_cmd < 0.0, f"drifted east, so it must fly west; got {east_cmd:+.3f}"
+    assert abs(north_cmd) < 1e-6
+
+
+def test_commit_hold_is_proportional_and_clamped():
+    """Bigger drift, bigger correction -- up to a ceiling.
+
+    Near the ground with the pad out of sight, a large horizontal command is
+    never the right answer however confident the estimate is.
+    """
+
+    def north_command(drift_m):
+        return landing.commit_hold_velocity(
+            30.0315 + drift_m / 111320.0, 72.3140, 30.0315, 72.3140
+        )[0]
+
+    small, large = abs(north_command(0.10)), abs(north_command(0.30))
+    assert large > small, "the correction must grow with the drift"
+    assert small == pytest.approx(config.COMMIT_HOLD_K_P * 0.10, abs=0.02)
+
+    assert abs(north_command(50.0)) == pytest.approx(config.COMMIT_HOLD_MAX_VEL_M_S), (
+        "an absurd drift -- a bad GPS jump -- must not become an absurd command"
+    )
+
+
+def test_commit_hold_beats_commanding_zero_over_a_realistic_commit():
+    """The measurement that motivated this, reproduced as a test.
+
+    Twenty-one live landings centred to 0.042 m at commit and then touched down
+    0.300 m out: the open-loop stretch added 0.170 m of drift that nothing
+    opposed, because a zero VELOCITY setpoint asks PX4 to stop moving rather
+    than to stay put.
+
+    A first-order plant with a steady disturbance is enough to show the
+    difference in kind. Commanding zero lets the disturbance integrate freely;
+    the position loop bounds it.
+    """
+    dt_s, tau_s = 1.0 / config.NAV_HZ, 0.35
+    disturbance_m_s = 0.05  # a light, steady push
+    commit_s = 6.0  # 1.2 m at DESCENT_VZ_FINAL_M_S
+
+    def fly(hold: bool) -> float:
+        north_m, v_m_s = 0.0, 0.0
+        for _ in range(int(commit_s / dt_s)):
+            cmd = 0.0
+            if hold:
+                cmd = landing.commit_hold_velocity(
+                    30.0315 + north_m / 111320.0, 72.3140, 30.0315, 72.3140
+                )[0]
+            v_m_s += (cmd - v_m_s) * (dt_s / tau_s)
+            north_m += (v_m_s + disturbance_m_s) * dt_s
+        return abs(north_m)
+
+    open_loop_m, held_m = fly(hold=False), fly(hold=True)
+    assert open_loop_m == pytest.approx(disturbance_m_s * commit_s, abs=0.02), (
+        "sanity: commanding zero lets the disturbance integrate unopposed"
+    )
+    assert held_m < open_loop_m * 0.5, (
+        f"holding position must at least halve the drift; got {held_m:.3f} m held "
+        f"against {open_loop_m:.3f} m open loop"
+    )

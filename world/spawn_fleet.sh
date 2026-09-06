@@ -153,6 +153,15 @@ for i in $(seq 0 $((FLEET_SIZE - 1))); do
     sleep 3
 done
 
+# ── 4. SITL-only parameters ──────────────────────────────────────────────────
+# The simulated battery drains to SIM_BAT_MIN_PCT in SIM_BAT_DRAIN seconds, and
+# that defaults to 60 -- less than one leg of a delivery. Without this the
+# low-battery failsafe takes the vehicle to RTL mid-mission. See
+# sim/set_sim_params.py for why this is a simulator artifact and not a tuning
+# choice. Non-fatal: a fleet that cannot set it is still flyable, just briefly.
+python3 "$PROJECT_ROOT/sim/set_sim_params.py" "$FLEET_SIZE" || \
+    echo "      warning: could not set SITL battery endurance; long missions may hit the failsafe"
+
 echo
 echo "=============================================="
 echo " Fleet launched. Next:"

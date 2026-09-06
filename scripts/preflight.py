@@ -293,7 +293,20 @@ def check_lidar_geometry(report: Report, drone_id: str, topic: str) -> None:
 
 
 def check_pad_models(report: Report) -> None:
-    """Every pad must exist and its texture must actually decode (finding F1)."""
+    """Every pad must decode EVERY marker its layout declares.
+
+    Two findings live in this check.
+
+    F1 was a texture that decoded in zero dictionaries, so the drone could never
+    lock on at all.
+
+    The one that produced the reported hover is subtler and is why this check
+    now looks at the whole layout rather than at one id: a pad whose only marker
+    is large decodes perfectly on the bench and becomes invisible below 2.5 m in
+    flight, because the marker outgrows the frame. A texture that is missing its
+    small centre marker would pass the old version of this check and strand the
+    drone at the same altitude all over again.
+    """
     try:
         import cv2
     except ImportError:
@@ -301,9 +314,10 @@ def check_pad_models(report: Report) -> None:
         return
 
     import world.marker_models as marker_models
+    import world.pad_layout as pad_layout
 
     detector = cv2.aruco.ArucoDetector(
-        cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50),
+        cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, pad_layout.ARUCO_DICTIONARY)),
         cv2.aruco.DetectorParameters(),
     )
 
@@ -312,40 +326,118 @@ def check_pad_models(report: Report) -> None:
     for role, uri in marker_models.PAD_MODELS.items():
         model = uri.removeprefix("model://")
         model_dir = PROJECT_ROOT / "sim" / "models" / model
-        expected_id = marker_models.ROLE_TO_ID[role]
+        pad_index = marker_models.ROLE_TO_ID[role]
+        expected = {m.marker_id for m in pad_layout.pad_markers(pad_index)}
 
         if not (model_dir / "model.sdf").exists():
             problems.append(f"{role}: {model_dir} missing")
             continue
 
-        textures = sorted(model_dir.glob("*.png"))
-        if not textures:
-            problems.append(f"{role}: no texture in {model_dir}")
+        stale = sorted(model_dir.glob("aruco_*.png"))
+        if stale:
+            problems.append(
+                f"{role}: the old single-marker texture {stale[0].name} is still "
+                f"present; run `python3 -m world.build_pads`"
+            )
+
+        texture = model_dir / f"{model}.png"
+        if not texture.exists():
+            problems.append(f"{role}: {texture.name} missing; run `python3 -m world.build_pads`")
             continue
 
-        image = cv2.imread(str(textures[0]))
+        image = cv2.imread(str(texture), cv2.IMREAD_GRAYSCALE)
         if image is None:
-            problems.append(f"{role}: {textures[0].name} unreadable")
+            problems.append(f"{role}: {texture.name} unreadable")
             continue
 
         _corners, ids, _rejected = detector.detectMarkers(image)
-        if ids is None:
+        found = set(ids.flatten().tolist()) if ids is not None else set()
+
+        if not found:
             problems.append(
-                f"{role}: {textures[0].name} does NOT decode as DICT_4X4_50 "
-                f"(no white quiet zone? see finding F1)"
+                f"{role}: {texture.name} does NOT decode as "
+                f"{pad_layout.ARUCO_DICTIONARY} (no white quiet zone? finding F1)"
             )
-        elif expected_id not in ids.flatten().tolist():
+        elif not found >= expected:
             problems.append(
-                f"{role}: {textures[0].name} decodes as {ids.flatten().tolist()}, "
-                f"expected id {expected_id}"
+                f"{role}: {texture.name} decodes {sorted(found)} but the layout "
+                f"declares {sorted(expected)}; missing {sorted(expected - found)}. "
+                f"Run `python3 -m world.build_pads`."
             )
         else:
-            checked.append(f"{model}=id{expected_id}")
+            checked.append(f"{model}={sorted(expected)}")
 
     if problems:
         report.add("landing pads decode", FAIL, "; ".join(problems))
     else:
         report.add("landing pads decode", PASS, ", ".join(checked))
+
+
+def check_landing_altitude_budget(report: Report) -> None:
+    """The pad must be visible over every altitude the landing loop flies through.
+
+    THIS IS THE CHECK WHOSE ABSENCE COST A DELIVERY. The controller descends
+    from SEARCH_ALT_M to the ground; if the pad stops being measurable partway,
+    the descent goes blind exactly where precision matters, and the symptom in
+    the air is a drone that hovers over its pad and never lands.
+
+    Every number here is derived from the shipped geometry, so changing a marker
+    size or the camera without re-deriving the controller's altitudes fails on
+    the bench.
+    """
+    try:
+        import world.pad_layout as pad_layout
+    except Exception as exc:  # noqa: BLE001
+        report.add("landing altitude budget", SKIP, f"pad_layout unimportable: {exc}")
+        return
+
+    tan_h = math.tan(config.CAMERA_HFOV_RAD / 2.0)
+    tan_v = (config.CAMERA_HEIGHT_PX / 2.0) / config.CAMERA_FX_PX
+
+    try:
+        low_m, high_m = pad_layout.coverage_m(config.CAMERA_FX_PX, tan_h, tan_v)
+    except ValueError as exc:
+        report.add("landing altitude budget", FAIL, str(exc))
+        return
+
+    commit_floor_m = pad_layout.visibility_floor_m(
+        config.CAMERA_FX_PX, tan_h, tan_v, offset_m=config.COMMIT_MAX_OFFSET_M
+    )
+
+    problems = []
+    if config.SEARCH_ALT_M > high_m:
+        problems.append(
+            f"SEARCH_ALT_M {config.SEARCH_ALT_M} m is above the {high_m:.2f} m "
+            f"ceiling at which markers stop being decodable -- the search would "
+            f"fly where the pad cannot be seen"
+        )
+    if config.COMMIT_ALT_M < low_m:
+        problems.append(
+            f"COMMIT_ALT_M {config.COMMIT_ALT_M} m is below the {low_m:.2f} m "
+            f"vision floor -- the drone goes blind before it may commit"
+        )
+    if config.COMMIT_ALT_M <= commit_floor_m:
+        problems.append(
+            f"COMMIT_ALT_M {config.COMMIT_ALT_M} m leaves no margin over the "
+            f"{commit_floor_m:.2f} m floor for a pad {config.COMMIT_MAX_OFFSET_M} m "
+            f"off axis -- the commit gate would be unsatisfiable"
+        )
+    if config.NO_CLIMB_ALT_M < low_m:
+        problems.append(
+            f"NO_CLIMB_ALT_M {config.NO_CLIMB_ALT_M} m is below the {low_m:.2f} m "
+            f"vision floor -- the drone could still climb when it loses the pad, "
+            f"which is the limit cycle this design exists to prevent"
+        )
+
+    if problems:
+        report.add("landing altitude budget", FAIL, "; ".join(problems))
+    else:
+        report.add(
+            "landing altitude budget",
+            PASS,
+            f"pad visible {low_m:.2f}-{high_m:.2f} m; search {config.SEARCH_ALT_M} m, "
+            f"commit {config.COMMIT_ALT_M} m, no-climb {config.NO_CLIMB_ALT_M} m",
+        )
 
 
 async def check_mavsdk(report: Report, drone_id: str, timeout_s: float) -> None:
@@ -482,6 +574,7 @@ async def run(drone_ids: list[str], skip: set[str], mavsdk_timeout_s: float) -> 
 
     if "pads" not in skip:
         check_pad_models(report)
+        check_landing_altitude_budget(report)
 
     found: dict[str, dict[str, str]] = {}
     if "topics" not in skip:

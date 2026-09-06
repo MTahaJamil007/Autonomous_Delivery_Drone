@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from drone_agent.landing import EMAFilter, select_target
+from drone_agent.landing import AlphaBetaTracker, select_target
 
 
 def test_marker_disambiguation():
@@ -42,39 +42,73 @@ def test_marker_disambiguation():
     print("✅ Marker disambiguation test passed: 100 consecutive frames, zero incorrect picks")
 
 
-def test_ema_filter_reduces_variance():
-    """
-    Test that EMA filter reduces variance in noisy input.
-    """
+def test_tracker_reduces_variance():
+    """The tracker that replaced the EMA must still smooth a noisy measurement."""
     import random
 
-    # Generate noisy signal (constant + noise)
-    true_value = (5.0, 3.0, 2.0)
+    rng = random.Random(7)
+    true_value = (5.0, 3.0)
     noise_amplitude = 1.0
+    dt_s = 0.1
 
-    samples = []
-    for _ in range(100):
-        noisy_sample = tuple(
-            v + random.uniform(-noise_amplitude, noise_amplitude) for v in true_value
-        )
-        samples.append(noisy_sample)
+    samples = [
+        tuple(v + rng.uniform(-noise_amplitude, noise_amplitude) for v in true_value)
+        for _ in range(100)
+    ]
 
-    # Apply filter
-    filter = EMAFilter(alpha=0.3)
-    filtered_samples = [filter.update(s) for s in samples]
+    tracker = AlphaBetaTracker()
+    filtered = [tracker.update(s, dt_s) for s in samples]
 
-    # Compute variance of last 50 samples (after filter settles)
     raw_variance = sum((s[0] - true_value[0]) ** 2 for s in samples[-50:]) / 50
-
-    filtered_variance = sum((s[0] - true_value[0]) ** 2 for s in filtered_samples[-50:]) / 50
+    filtered_variance = sum((s[0] - true_value[0]) ** 2 for s in filtered[-50:]) / 50
 
     assert filtered_variance < raw_variance, (
-        f"Filter should reduce variance: raw={raw_variance:.3f}, filtered={filtered_variance:.3f}"
+        f"the tracker should reduce variance: raw={raw_variance:.3f}, "
+        f"filtered={filtered_variance:.3f}"
     )
 
-    print(
-        f"✅ EMA filter test passed: variance reduced from {raw_variance:.3f} to {filtered_variance:.3f}"
+
+def test_tracker_coasts_through_a_dropped_frame():
+    """THE CAPABILITY THE EMA DID NOT HAVE.
+
+    An EMA has only a position state, so a frame with no detection leaves it
+    holding a stale value and the loop treats the gap as a lost lock. The
+    tracker carries a velocity state, so it extrapolates -- which is what turns
+    a dropped frame into a small prediction error instead of an abort.
+    """
+    tracker = AlphaBetaTracker()
+    dt_s = 0.1
+
+    # A target closing at a steady 0.5 m/s along the first axis.
+    for i in range(40):
+        tracker.update((1.0 - 0.5 * i * dt_s, 0.0), dt_s)
+
+    assert tracker.velocity[0] < -0.3, (
+        f"the tracker should have learned the closing rate, got {tracker.velocity[0]:.3f} m/s"
     )
+
+    before = tracker.position[0]
+    coasted = tracker.predict(dt_s)
+    assert coasted is not None
+    assert coasted[0] < before, "predict() must advance the estimate along its velocity"
+    assert abs(coasted[0] - (before - 0.5 * dt_s)) < 0.02, (
+        "the extrapolation should land within 2 cm of where the target actually went"
+    )
+
+
+def test_tracker_reset_discards_a_stale_lock():
+    """A reacquired pad must not be averaged with where it was seconds ago."""
+    tracker = AlphaBetaTracker()
+    tracker.update((3.0, -2.0), 0.1)
+    tracker.update((3.1, -2.1), 0.1)
+    assert tracker.position is not None
+
+    tracker.reset()
+    assert tracker.position is None
+    assert tracker.velocity == (0.0, 0.0)
+
+    first = tracker.update((0.2, 0.1), 0.1)
+    assert first == (0.2, 0.1), "the first sample after a reset is the estimate"
 
 
 def test_select_target_missing_marker():
@@ -94,6 +128,8 @@ def test_select_target_missing_marker():
 
 if __name__ == "__main__":
     test_marker_disambiguation()
-    test_ema_filter_reduces_variance()
+    test_tracker_reduces_variance()
+    test_tracker_coasts_through_a_dropped_frame()
+    test_tracker_reset_discards_a_stale_lock()
     test_select_target_missing_marker()
     print("\n🎉 All landing module tests passed!")
