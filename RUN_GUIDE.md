@@ -38,6 +38,12 @@ skip and should not.
 
 Set `PX4_DIR` if PX4 lives elsewhere.
 
+A `vision_env/` virtualenv ships in the repo root. It is optional — it was
+created with `include-system-site-packages = true`, so it sees the same
+packages the bare system `python3` does, and adds no isolation on this host.
+Activate it (`source vision_env/bin/activate`) if you want a dedicated shell
+for this project; everything below works identically with or without it.
+
 ### One-time setup
 
 ```bash
@@ -50,6 +56,14 @@ make check          # every gate must be green before you fly anything
 needed on this host: the system `setuptools` (59.6) predates PEP 660, and pip's
 isolated build picks it up and refuses the editable install with a confusing
 message about a missing `build_editable` hook.
+
+It also upgrades `setuptools` first, and skips `--user` for that upgrade when
+run inside a virtualenv (`vision_env` included) — a venv's own site-packages
+already wins the path race, so pip refuses `--user` there with *"Will not
+install to the user site because it will lack sys.path precedence to
+setuptools in .../site-packages"*. If you see that error, you are on an older
+checkout; pull the latest `Makefile` or drop `--user` from that one line
+yourself.
 
 ---
 
@@ -66,6 +80,24 @@ world/spawn_fleet.sh     # 2. Gazebo server + PX4 instance(s)
 scripts/run_system.sh    # 3. services, bridges, avoiders, vision
 ```
 
+**`scripts/run_system.sh` refuses to start on top of a previous run.** It
+records every pid it starts in `/tmp/droneprogram/run_system.pids`, and if any
+of those processes (checked against `/proc/<pid>/cmdline`, so a reused pid from
+something unrelated cannot trip this) is still alive, it stops instead of
+stacking a second avoider and a second vision bridge onto the same drone —
+that is finding F7 all over again, and it would also overwrite the pid file so
+`stop_system.sh` could no longer clean up the first stack. The fix is almost
+always:
+
+```bash
+scripts/stop_system.sh
+scripts/run_system.sh
+```
+
+If you are certain the recorded pids are stale (e.g. the machine rebooted and
+they were reassigned to something else), `scripts/run_system.sh --force` skips
+the check.
+
 ### Then verify, before dispatching anything
 
 ```bash
@@ -73,16 +105,20 @@ python3 scripts/preflight.py
 ```
 
 **If preflight fails, do not dispatch.** It checks the things whose absence is
-invisible from the Python side: that the model-scoped camera and LiDAR topics are
-actually advertised, that the live image dimensions match the intrinsics the
-landing controller is derived from, that the scan geometry matches the avoider's
-sector maths, that every pad texture really decodes to its expected ArUco ID, and
-that MAVSDK and the obstacle service answer.
+invisible from the Python side: that every pad's markers actually decode and stay
+readable across the whole descent (not just at one altitude), that the
+model-scoped camera and LiDAR topics are actually advertised, that the live image
+dimensions match the intrinsics the landing controller is derived from, that the
+scan geometry matches the avoider's sector maths, and that MAVSDK, the obstacle
+service and the fleet dispatcher itself all answer.
 
-Two of the seven root causes behind the last remediation — an undecodable landing
-pad, and a sensor suite living in an uncommitted third-party submodule — stayed
-hidden for months precisely because nothing ran this check. The drone armed, took
-off and flew blind, and the only symptom was a mission that "didn't quite work".
+Two of the seven root causes behind the P0–P7 remediation — an undecodable
+landing pad, and a sensor suite living in an uncommitted third-party submodule —
+stayed hidden for months precisely because nothing ran this check. The drone
+armed, took off and flew blind, and the only symptom was a mission that "didn't
+quite work". A later one — `fleet_dispatch` crashing during startup while
+preflight still reported every check green — is why "fleet dispatch service" is
+its own check now, hitting `/fleet/status` rather than a bare socket.
 
 Then open <http://localhost:5000>.
 
@@ -118,18 +154,32 @@ lidar    /world/delivery/model/x500_delivery_0/link/lidar_link/sensor/rplidar_a1
 ros-scan /drone_0/scan
 ```
 
-**After `scripts/run_system.sh`** — preflight passes, all six checks:
+**After `scripts/run_system.sh`** — preflight passes, all ten checks (one drone;
+each extra drone adds five more: its own camera/lidar topic, camera/lidar
+geometry, and mavsdk checks):
 
 ```
-[  ok  ] landing pads decode          pad_0=id0, pad_1=id1, pad_2=id2
+[  ok  ] landing pads decode          pad_0=[0, 10, 11, 12, 13], pad_1=[1, 20, 21, 22, 23], pad_2=[2, 30, 31, 32, 33]
+[  ok  ] landing altitude budget      pad visible 0.69-6.43 m; search 6.0 m, commit 1.2 m, no-climb 3.0 m
 [  ok  ] gazebo reachable             48 topics advertised
 [  ok  ] drone-0: camera topic        /world/delivery/.../downward_camera/image
 [  ok  ] drone-0: lidar topic         /world/delivery/.../rplidar_a1/scan
 [  ok  ] drone-0: camera geometry     320x240, fx=277.2 px, 2.0 m pad spans 92 px at 6 m
 [  ok  ] drone-0: lidar geometry      360 samples, angle_min=-3.1416 rad, range_max=12.0 m
+[  ok  ] drone-0: mavsdk              udp://0.0.0.0:14540
+[  ok  ] obstacle memory service      http://127.0.0.1:5050/ -> Obstacle Memory Service
+[  ok  ] fleet dispatch service       http://127.0.0.1:5000/fleet/status -> 1 drone(s) registered
 
-PREFLIGHT PASS - 6 checks, 0 failures
+PREFLIGHT PASS - 10 checks, 0 failures
 ```
+
+Each pad now carries five ArUco markers (a small centre one plus four larger
+ones around it, per `world/pad_layout.py`) rather than one — a single large
+marker decodes fine on the bench but goes out of frame below ~2.5 m in flight,
+which is what produced the original "hovers and never lands" report. `landing
+altitude budget` is the check that would have caught it: it fails if
+`SEARCH_ALT_M`, `COMMIT_ALT_M` or `NO_CLIMB_ALT_M` in `config.py` fall outside
+the altitude range the shipped pad geometry can actually see.
 
 **The avoider is alive and seeing nothing** (the drone is on the ground in an
 empty area, so `eff_front_m` should be the 15.0 m infinity substitute — a
@@ -244,6 +294,15 @@ grep 'Spawning Gazebo model' /tmp/droneprogram/px4_0.log
 Almost always: `sim/env.sh` was not sourced, so PX4 spawned the stock `x500`
 (which has no camera and no LiDAR) instead of `x500_delivery`.
 
+If `world/spawn_fleet.sh` printed `world 'delivery' already running, reusing
+it`, you are launching a new PX4 instance into a Gazebo world left over from
+an earlier session — run `scripts/stop_system.sh` first (it also sweeps stray
+`gz sim`/`px4` processes), then `world/spawn_fleet.sh` again for a clean
+world. Also give it a few seconds: model spawning happens after PX4 reports a
+MAVLink heartbeat, so a `preflight.py` run immediately after
+`world/spawn_fleet.sh` prints "Fleet launched" can catch the drone mid-spawn.
+`scripts/run_system.sh` already accounts for this with its own delay.
+
 ### The drone takes off and then hovers, going nowhere
 
 Working as designed. Navigation is **fail-closed**: with no obstacle data it
@@ -291,6 +350,43 @@ The dispatcher recovers these automatically at startup. To force it:
 python3 reset_fleet_database.py
 ```
 
+### `make test` / `make check` fails two `test_dispatch_endtoend.py` tests
+
+```
+a dispatch that cannot fly must be FAILED, got IN_PROGRESS
+job ... ended as QUEUED; the queued job must be started by the drain step
+```
+
+These two tests assert what happens when a dispatch has **no autopilot to fly
+against** — that is the scenario they are testing. If a real fleet (PX4 SITL)
+is up in another terminal, the dispatcher finds a live drone instead, the
+mission actually proceeds, and the job never reaches `FAILED` on the test's
+short timeout, so it fails for the opposite of the right reason. Stop the
+fleet before running the suite:
+
+```bash
+scripts/stop_system.sh
+pkill -f 'gz sim'; pkill -f 'px4_sitl_default/bin/px4'
+make test
+```
+
+If nothing else is running and this still fails, it is a real regression —
+not this.
+
+### A bridge log balloons to hundreds of MB and the rest of `run_system.sh` never comes up
+
+```bash
+tail -c 400 /tmp/droneprogram/ros_gz_bridge_0.log
+# Exception sending a multicast message:Network is unreachable  (repeated forever)
+```
+
+`ros_gz_bridge` (a ROS 2 / DDS process) tried to discover peers over multicast
+and every network interface was down. `sim/env.sh` sets `ROS_LOCALHOST_ONLY=1`
+to stop it from trying — everything in this system talks over `127.0.0.1`
+anyway — but that only takes effect for processes started **after** it is
+sourced. Kill the runaway process, confirm `echo $ROS_LOCALHOST_ONLY` prints
+`1`, and restart.
+
 ### Everything is wedged
 
 ```bash
@@ -319,11 +415,16 @@ Most likely to want changing:
 | `CRUISE_SPEED_M_S` | 3.5 | Maximum forward speed |
 | `SEARCH_ALT_M` | 6.0 | Altitude for marker search — see CALIBRATION § 3 before changing |
 | `PAD_SIZE_M` | 2.0 | Must match `sim/models/pad_N/model.sdf` |
+| `COMMIT_ALT_M` | derived | Altitude below which the descent goes open-loop; derived from pad geometry, not chosen |
+| `NO_CLIMB_ALT_M` | 3.0 | Floor below which the controller may not climb back away from the pad |
 | `SAFE_DIST` | 6.5 | Frontal distance that triggers a dodge |
 | `ESCALATION_LOCK_S` | 12.0 | Dodge duration before a detour is planned |
 | `GEOFENCE_RADIUS_M` | 500.0 | Also uploaded to PX4 as a real fence |
 
-After changing anything in the camera or pad group, run `make schema-check`.
+After changing anything in the camera or pad group, run `make schema-check` —
+and note `python3 scripts/preflight.py`'s **landing altitude budget** check now
+also fails if `SEARCH_ALT_M`, `COMMIT_ALT_M` or `NO_CLIMB_ALT_M` fall outside
+what the shipped pad markers can actually be seen across.
 
 ---
 
@@ -336,6 +437,7 @@ After changing anything in the camera or pad group, run `make schema-check`.
 | [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) | Every acceptance criterion and how it is verified |
 | [STATUS.md](STATUS.md) | What works, with evidence for each claim |
 | [CHANGELOG.md](CHANGELOG.md) | History |
+| [docs/LANDING_REWRITE_LOG.md](docs/LANDING_REWRITE_LOG.md) | Flight-by-flight log of the Sep 2026 precision-landing rewrite |
 | [docs/IMPLEMENTATION_REPORT.md](docs/IMPLEMENTATION_REPORT.md) | What changed, what is left, and why |
 
 Shareable web versions of this guide (*Dispatch Runbook*) and the handover

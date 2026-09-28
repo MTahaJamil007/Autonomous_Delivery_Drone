@@ -688,10 +688,10 @@ def test_commit_hold_is_proportional_and_clamped():
 def test_commit_hold_beats_commanding_zero_over_a_realistic_commit():
     """The measurement that motivated this, reproduced as a test.
 
-    Twenty-one live landings centred to 0.042 m at commit and then touched down
-    0.300 m out: the open-loop stretch added 0.170 m of drift that nothing
-    opposed, because a zero VELOCITY setpoint asks PX4 to stop moving rather
-    than to stay put.
+    Nine live landings centred to 0.042 m at commit and then touched down
+    0.209 m out on average: the open-loop stretch added 0.170 m of drift that
+    nothing opposed, because a zero VELOCITY setpoint asks PX4 to stop moving
+    rather than to stay put.
 
     A first-order plant with a steady disturbance is enough to show the
     difference in kind. Commanding zero lets the disturbance integrate freely;

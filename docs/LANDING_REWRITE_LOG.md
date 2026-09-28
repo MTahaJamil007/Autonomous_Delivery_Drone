@@ -387,3 +387,151 @@ working end to end for the first time.
 All errors are Gazebo ground truth — the drone's own EKF is what the controller
 steers on, so it cannot also be the judge.
 
+---
+
+## Session 3 — 7 Sep 2026
+
+### Two rig defects found before any flight
+
+**DDS multicast filled a log and blocked startup.** The rig was relaunched on a
+machine whose `enp0s31f6` and `wwan0` interfaces were DOWN. `ROS_LOCALHOST_ONLY`
+was `0`, so the ros_gz bridge kept trying multicast discovery and wrote
+
+```
+Exception sending a multicast message:Network is unreachable
+```
+
+in a tight loop until `ros_gz_bridge_0.log` reached **354 MB**. The rest of
+`run_system.sh` never came up behind it, so the dispatcher was absent and the
+trial script polled a service that did not exist.
+
+Every process here talks over 127.0.0.1, so `sim/env.sh` now exports
+`ROS_LOCALHOST_ONLY=1` — which removes the multicast attempt rather than the
+symptom, and is simply the truth about this deployment.
+
+### Corner refinement was requested and never happening
+
+The research sweep turned up an OpenCV detail the earlier tuning study had
+missed. OpenCV sizes the sub-pixel search window as
+`relativeCornerRefinmentWinSize * (average marker side)`, clamped by
+`cornerRefinementWinSize`. **At the default 0.3, a marker must span roughly
+32 px before that product reaches even one pixel** — so `CORNER_REFINE_SUBPIX`,
+which this project has always set, was silently skipped for every smaller
+marker. A descent spends its long-range frames exactly there: a 0.58 m outer
+marker spans 19–25 px at 7–8 m.
+
+The earlier study concluded "tuning changes nothing" and it was right about what
+it measured — *detection rate* is saturated at 72/72 on the nested pad, because
+the pad design already solved visibility. It never measured *corner accuracy*.
+
+Measured on this project's own texture, 72 frames from 1–8 m with two offsets,
+two blur levels, noise and tilt, scored through the real estimator against
+ground truth:
+
+| config | median | p90 | phantom ids |
+| --- | --- | --- | --- |
+| default | 8.6 mm | 23.2 mm | 0 |
+| **`relativeCornerRefinmentWinSize = 1.0`** | **6.9 mm** | **16.3 mm** | **0** |
+| full published "small marker" set | 7.3 mm | 17.6 mm | 1 |
+
+One assignment cuts the p90 by 30%. The rest of the published set was measured
+and deliberately **not** adopted: it moved nothing here and its
+`errorCorrectionRate = 1.0` bought a phantom id — a bad trade against a
+detection rate that is already 72/72. Pinned by
+`test_corner_refinement_is_actually_enabled_for_small_markers`.
+
+### The audit found a wedge band the flights never happened to hit
+
+An adversarial audit probe dropped the loop in at 2.5 m with the pad out of
+frame and watched it hold for the **full 200 s timeout**, in phase `hold`,
+issuing nothing but hold commands.
+
+Between `COMMIT_ALT_M + 0.3` (1.5 m) and `NO_CLIMB_ALT_M` (3.0 m) the loop has
+no move left. It is too **low** to climb away and search — `may_climb` is False
+by design, because climbing on a lost pad is the exact behaviour that caused the
+reported hover — and too **high** for the commit-on-last-trim fallback.
+
+Two things had to be wrong at once for that to survive:
+
+1. The stall watchdog only asked whether a **held** pad was failing to descend.
+   With no lock at all it never looked.
+2. The hold branch ended in `continue`, which stepped straight over the watchdog
+   at the bottom of the loop — so even a widened check would not have run.
+
+Both are fixed: the watchdog now also covers "no lock, and too low to search",
+and the hold branch falls through to it. The search branch stays exempt, because
+a spiral holds altitude on purpose and charging it with failing to descend would
+abort every search.
+
+This is a milder relative of the original bug — it terminates rather than
+looping forever — but it spends the battery the return leg needs, doing nothing.
+Pinned by `test_losing_the_pad_between_the_commit_and_no_climb_does_not_hover`,
+which fails against the code as flown.
+
+### Closing the commit loop: the single largest accuracy win
+
+The baseline sweep separated the two error sources for the first time:
+
+| | mean | max |
+| --- | --- | --- |
+| offset at commit (what vision achieves) | 0.042 m | 0.065 m |
+| **drift during the open-loop commit** | **0.170 m** | **0.211 m** |
+| touchdown error | 0.209 m | 0.466 m |
+
+**The controller was four times more accurate than the landing it produced**,
+and the whole gap was drift over the last 1.2 m that nothing opposed.
+
+The cause was a wrong instinct expressed correctly. The commit handed the last
+stretch to PX4 "because PX4 holds a spot better than this loop can
+extrapolate" — true, but it did so by commanding **zero velocity**, and a zero
+velocity setpoint asks PX4 to *stop moving*, not to *stay put*. Drift already
+accumulated was never taken back.
+
+The commit is open loop with respect to **vision**, because the pad has left the
+frame. It never had a reason to be open loop with respect to **position**. It
+now holds the spot it committed from, against the drone's own estimate, which is
+entirely trustworthy over the four to six seconds involved. This is what PX4's
+PrecLand does in its own final descent.
+
+### Measured effect of closing the commit loop
+
+Same seven routes, same rig, same everything but the last 1.2 m:
+
+| | landings | mean | median | max | within 0.5 m |
+| --- | --- | --- | --- | --- | --- |
+| commit commands zero velocity | 9 | 0.209 m | 0.175 m | 0.466 m | 9/9 |
+| **commit holds position** | 11 | **0.082 m** | 0.086 m | **0.116 m** | 11/11 |
+
+**2.5x better on the mean and 4x better on the worst case.** The old worst case
+sat at 0.466 m against a 0.5 m criterion — passing with almost no margin, and
+one gust from failing. The new worst case is 0.116 m, four times inside it.
+
+The vision-guided phase was never the limit: it centres to 0.042 m mean either
+way. The whole difference is that the final metre stopped being unopposed.
+
+### A rig limit worth writing down
+
+The formal twenty-one-landing gate needs the machine mostly to itself. Two
+separate runs were spoiled by CPU contention while audit agents were working,
+and each time the failure looked like a flight-software bug until it was traced:
+
+* **LiDAR feed staleness.** `obstacle feed silent for 1.1s - holding position
+  instead of flying blind`, repeatedly. Navigation was behaving correctly; the
+  bridge simply could not sustain 10 Hz.
+* **`Preflight Fail: Battery unhealthy`** blocking the next leg's arming, while
+  MAVSDK reported the battery at 100% and 16.2 V. PX4's `battery_status`
+  publication was gapping under lockstep starvation. It cleared the moment the
+  sweep stopped.
+
+Neither is a defect in this code, and both are covered by the fail-closed
+behaviour working as designed. But they do mean **flight numbers taken under
+load are not trustworthy**, and the four CPUs here are shared with anything else
+running. Run the gate on a quiet machine, and check `uptime` and
+`gz topic -e -t /world/delivery/stats` before believing a bad result.
+
+The second of those also exposed a message that named the wrong cause:
+`arm_and_takeoff` reported "EKF/GPS did not converge" for what the PX4 console
+called a battery problem. It now reports which of the three health conditions
+actually failed, and says explicitly when GPS and the EKF were fine — the same
+class of fix as every other misleading message in this log.
+

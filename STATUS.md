@@ -77,7 +77,7 @@ measured factor.
 
 ```
 $ scripts/test.sh
-126 passed, 3 deselected in ~37 s
+196 passed, 3 deselected in ~40 s
 ```
 
 The 3 deselected are `@pytest.mark.sitl` scenarios, excluded by `pytest.ini`

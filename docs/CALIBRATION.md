@@ -101,8 +101,40 @@ run is the evidence.
 | _pending_ | forward | 0.4 m/s | — | — | — | — |
 | _pending_ | right | 0.4 m/s | — | — | — | — |
 
-The remediation shipped with these rows unfilled because the confirmation needs a
-live simulator. Filling them in is the last item on the P4 gate.
+The velocity-based runs above are still outstanding. The convention itself,
+however, **has now been confirmed live** — by a different and in some ways
+stronger method, because it needs no assumption about achieved velocity.
+
+### Static confirmation, 6 Sep 2026
+
+A probe model with optics identical to `x500_delivery`'s `downward_camera`
+(320x240, hfov 1.047, pitched +90° to look down) was teleported over `pad_0` in
+the running simulator, and the real detector and `perception.pad_estimator` were
+run on the rendered frames. Displacing the *camera* by a known amount is exact,
+whereas commanding a velocity for a duration is not — which is why the `fx`
+estimate in the velocity method carries 10–20% of slack and this one does not.
+
+With the camera moved to world **+0.30 m along X** and the pad at the origin, the
+estimator reported the pad centre at
+
+```
+u = -0.005 … +0.002 m        (essentially zero)
+v = +0.293 … +0.339 m        (true value +0.300)
+```
+
+across every altitude from 1.20 m to 8.00 m. The displacement appeared **wholly
+in v and not at all in u.**
+
+That is the derivation confirmed. For this mount `R_y(90°)` sends image right to
+world −Y and image down to world −X, so a camera displaced to world **+X** must
+see the pad at **+v** and nowhere in u — a pad *behind* the drone appearing
+*below* the image centre, which is exactly `image v -> body AFT`.
+
+Had the mapping been inverted, the same displacement would have come back as
+`v = -0.300`, and the sign error would have been visible immediately rather than
+as a drone flying away from its pad.
+
+Recorded against the sweep in [LANDING_REWRITE_LOG.md](LANDING_REWRITE_LOG.md).
 
 ---
 

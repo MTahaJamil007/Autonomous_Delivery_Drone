@@ -587,9 +587,9 @@ def commit_hold_velocity(
 
     Commanding zero velocity -- the first implementation -- asks PX4 to stop
     moving rather than to stay put, so drift already accumulated is never taken
-    back. Measured over twenty-one landings, that cost 0.170 m on average
-    against a 0.042 m offset at commit: four fifths of the final error arrived
-    after the controller stopped correcting.
+    back. Measured over nine landings -- three complete deliveries -- that cost
+    0.170 m of drift on average against a 0.042 m offset at commit: four fifths
+    of the final error arrived after the controller stopped correcting.
 
     Deadbanded and clamped, because near the ground with no view of the pad a
     large horizontal command is never right, and correcting inside the
@@ -792,7 +792,7 @@ async def execute_precision_landing(
             # rest to PX4, reasoning that PX4 holds a spot better than this loop
             # can extrapolate. True, but a zero VELOCITY setpoint asks PX4 to
             # stop moving, not to stay put, so drift already accumulated was
-            # never taken back. Twenty-one landings measured 0.170 m of drift
+            # never taken back. Nine landings measured 0.170 m of drift
             # against a 0.042 m offset at commit -- four fifths of the final
             # error arriving after the controller stopped correcting.
             #
@@ -1024,8 +1024,16 @@ async def execute_precision_landing(
                     commit_started_at = now
                     commit_lat = drone_state.get("lat", 0.0)
                     commit_lon = drone_state.get("lon", 0.0)
-                await asyncio.sleep(dt_s)
-                continue
+                    await asyncio.sleep(dt_s)
+                    continue
+
+                # NO `continue` HERE, AND THAT IS THE POINT.
+                #
+                # This branch used to skip straight back to the top of the loop,
+                # which stepped over the stall watchdog at the bottom -- the one
+                # check that would have noticed the drone was holding and not
+                # descending. Falling through means a hold that goes nowhere is
+                # counted like any other lack of progress.
 
             if waypoint_index >= len(waypoints):
                 logger.error(
@@ -1071,14 +1079,36 @@ async def execute_precision_landing(
         # ── Stall watchdog ──────────────────────────────────────────────────
         if now - last_progress_t >= config.STALL_WINDOW_S:
             descended_m = last_progress_alt - height_m
-            if locked and descended_m < config.STALL_MIN_DESCENT_M:
+            # Two ways to be stalled, and the second one used to be missed.
+            #
+            # `locked` catches "holding the pad but not coming down". The
+            # `not may_climb` arm catches the band this loop can get wedged in:
+            # lose the pad between COMMIT_ALT_M + 0.3 and NO_CLIMB_ALT_M and it
+            # is too LOW to climb away and search, and too HIGH for the
+            # commit-on-last-trim fallback. It then holds, and because `locked`
+            # is False the watchdog never looked.
+            #
+            # Found by an audit probe rather than a flight: dropped in at 2.5 m
+            # with the pad out of frame, the loop held for the full 200 s
+            # timeout in phase `hold`, commanding nothing but `hold` the whole
+            # way. A milder relative of the bug this whole rewrite is about -- it
+            # does terminate, but it spends the battery a return leg needs doing
+            # nothing.
+            #
+            # The search branch is deliberately NOT covered: a spiral holds
+            # altitude on purpose, so charging it with failing to descend would
+            # abort every search. That is why this is `not may_climb` rather
+            # than "not descending".
+            wedged = not may_climb(height_m)
+            if (locked or wedged) and descended_m < config.STALL_MIN_DESCENT_M:
                 logger.error(
-                    "[%s] pad held but only %.2f m descended in %.0f s at %.2f m - "
+                    "[%s] only %.2f m descended in %.0f s at %.2f m (%s) - "
                     "aborting rather than hovering to the timeout",
                     drone_id,
                     descended_m,
                     config.STALL_WINDOW_S,
                     height_m,
+                    "pad held" if locked else "no lock, and too low to search",
                 )
                 publisher.hold(heading_deg)
                 if fsm is not None:

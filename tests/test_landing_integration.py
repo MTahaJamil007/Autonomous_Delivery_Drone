@@ -624,3 +624,42 @@ async def test_a_land_command_that_does_not_disarm_puts_offboard_back(monkeypatc
     assert outcome == landing.LandingOutcome.STALLED, (
         f"an autopilot that never disarms must be reported, not papered over; got {outcome}"
     )
+
+
+async def test_losing_the_pad_between_the_commit_and_no_climb_does_not_hover(monkeypatch):
+    """The wedge band, found by an audit probe rather than by a flight.
+
+    Lose the pad between `COMMIT_ALT_M + 0.3` (1.5 m) and `NO_CLIMB_ALT_M`
+    (3.0 m) and the loop has no move left:
+
+      * too LOW to climb away and search -- `may_climb` is False by design,
+        because climbing on a lost pad is the exact behaviour that produced the
+        reported hover;
+      * too HIGH for the commit-on-last-trim fallback, which only fires at or
+        below 1.5 m.
+
+    So it held. And the stall watchdog did not notice, because it only asked
+    whether a *held* pad was failing to descend, and here there was no lock at
+    all. Dropped in at 2.5 m with the pad out of frame, the loop sat in phase
+    `hold` for the full 200 s timeout issuing nothing but hold commands.
+
+    Milder than the original bug -- it terminates rather than looping forever --
+    but it spends the battery the return leg needs, doing nothing. The watchdog
+    now also covers "no lock, and too low to search", which is the only other
+    way to be stuck; the search branch stays exempt because a spiral holds
+    altitude on purpose.
+    """
+    publisher = FakePublisher()
+    # visible_below_m above the start altitude: the pad is never seen at all.
+    world = World(publisher, offset_m=0.3, altitude_m=2.5, visible_below_m=5.0)
+
+    outcome = await run_landing(world, monkeypatch, max_ticks=100_000)
+    elapsed_s = world.now - 1000.0
+
+    assert outcome == landing.LandingOutcome.STALLED, (
+        f"a drone that cannot search and cannot commit must give up, not hover; got {outcome}"
+    )
+    assert elapsed_s < config.STALL_WINDOW_S * 3, (
+        f"it should abort within a few stall windows, not run to the "
+        f"{config.LANDING_TIMEOUT_S} s timeout; took {elapsed_s:.0f} s"
+    )

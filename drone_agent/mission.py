@@ -490,8 +490,15 @@ class DroneMission:
         self._status("waiting for EKF")
         deadline = time.monotonic() + config.EKF_CONVERGE_TIMEOUT_S
 
+        # Remember WHICH of the three conditions was false, because they fail for
+        # completely different reasons and the operator has to be told which.
+        last_health: dict[str, bool] = {}
+
         async def _wait_armable() -> None:
             async for health in self._drone.telemetry.health():
+                last_health["global_position_ok"] = health.is_global_position_ok
+                last_health["home_position_ok"] = health.is_home_position_ok
+                last_health["armable"] = health.is_armable
                 if (
                     health.is_global_position_ok
                     and health.is_home_position_ok
@@ -503,9 +510,35 @@ class DroneMission:
         try:
             await asyncio.wait_for(_wait_armable(), timeout=max(1.0, deadline - time.monotonic()))
         except asyncio.TimeoutError as exc:
+            # THE MESSAGE USED TO NAME THE WRONG CAUSE.
+            #
+            # It said "EKF/GPS did not converge" whatever had actually failed.
+            # On 7 Sep 2026 a mission died here on leg 3 and reported exactly
+            # that, while the PX4 console said:
+            #
+            #     WARN [health_and_arming_checks] Preflight Fail: Battery unhealthy
+            #
+            # The EKF was fine. An operator following the message would have
+            # gone looking at GPS and sensor fusion for a battery problem --
+            # which is the same failure mode as every other misleading message
+            # this system has been carrying: it sends you to the wrong place
+            # confidently.
+            #
+            # `is_armable` is PX4's summary of a dozen preflight checks, so it
+            # cannot say which one; but it CAN say that the EKF was not the
+            # problem, and that is most of the value.
+            blocked = [name for name, ok in last_health.items() if not ok] or ["unknown"]
+            detail = (
+                "GPS/EKF has not converged"
+                if not last_health.get("global_position_ok", True)
+                or not last_health.get("home_position_ok", True)
+                else "GPS and home position are FINE -- the autopilot is refusing to arm "
+                "for some other preflight reason (battery, sensor calibration, RC). "
+                "The PX4 console prints which: look for 'Preflight Fail'"
+            )
             raise TimeoutError(
-                f"EKF/GPS did not converge within {config.EKF_CONVERGE_TIMEOUT_S}s. "
-                f"Check the PX4 console for 'Preflight Fail' messages."
+                f"Not armable within {config.EKF_CONVERGE_TIMEOUT_S}s. "
+                f"Failing checks: {', '.join(blocked)}. {detail}."
             ) from exc
 
         self._status("arming")

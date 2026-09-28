@@ -443,6 +443,8 @@ def test_empty_detection_frames_are_still_reported():
     and sees nothing. Sending nothing at all is indistinguishable from a crashed
     process, which is why the receiver's staleness check needs these frames.
     """
+    import cv2
+
     from perception.vision_bridge import ArucoDetectorWrapper
 
     blank = np.full((240, 320, 3), 255, np.uint8)
@@ -480,3 +482,42 @@ def test_fresh_then_stale_transition():
         "supervisor's heartbeat check depends on that distinction to avoid "
         "firing an emergency RTL at t=0"
     )
+
+
+def test_corner_refinement_is_actually_enabled_for_small_markers():
+    """CORNER_REFINE_SUBPIX alone does nothing to the markers that need it most.
+
+    OpenCV sizes the sub-pixel search window as
+    `relativeCornerRefinmentWinSize * (average marker side)` and then clamps it
+    to `cornerRefinementWinSize`. At OpenCV's default of 0.3, a marker has to
+    span roughly 32 px before that product reaches even one pixel -- so for
+    every marker smaller than that the refinement is requested and silently
+    skipped. A descent spends its long-range frames right there: a 0.58 m outer
+    marker spans 19-25 px at 7-8 m.
+
+    Measured on this project's own pad texture over 72 frames from 1-8 m, with
+    two offsets, two blur levels, noise and tilt, scored through the real
+    estimator against ground truth:
+
+        default (0.3)   median 8.6 mm   p90 23.2 mm
+        this setting    median 6.9 mm   p90 16.3 mm
+
+    Those corners become the pad centre, so the p90 improvement is a centring
+    improvement. This test exists because the setting is easy to drop in a
+    refactor and nothing else would notice: detection rate is unchanged at
+    72/72 either way, so only accuracy regresses.
+    """
+    import cv2
+
+    from perception.vision_bridge import ArucoDetectorWrapper
+
+    wrapper = ArucoDetectorWrapper()
+    params = wrapper._detector.getDetectorParameters()
+
+    assert params.cornerRefinementMethod == cv2.aruco.CORNER_REFINE_SUBPIX
+
+    if hasattr(params, "relativeCornerRefinmentWinSize"):
+        assert params.relativeCornerRefinmentWinSize >= 1.0, (
+            "corner refinement is disabled for markers under ~32 px, which is "
+            "most of a descent's long-range frames"
+        )

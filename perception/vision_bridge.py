@@ -126,7 +126,46 @@ class ArucoDetectorWrapper:
         # minMarkerPerimeterRate, polygonalApproxAccuracyRate and
         # minMarkerDistanceRate for the closely-spaced nested markers). Adding
         # parameters that change nothing would only add ways to be wrong later.
+        #
+        # That sweep measured DETECTION RATE, and on this pad detection rate is
+        # saturated: the nested layout keeps a large marker in view at every
+        # altitude, so there is nothing left for looser thresholds to recover.
+        # It did not measure CORNER ACCURACY, and that turned out to hide a
+        # setting that was quietly doing nothing.
         params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+
+        # THE REFINEMENT ABOVE IS A NO-OP WITHOUT THIS LINE.
+        #
+        # OpenCV sizes the sub-pixel search window as
+        # `relativeCornerRefinmentWinSize * (average marker side)`, then takes
+        # the smaller of that and `cornerRefinementWinSize`. At the default 0.3
+        # a marker must span roughly 32 px before the window reaches even one
+        # pixel, so for everything smaller -- which is most of a descent's
+        # long-range frames, where a marker spans 19-25 px at 7-8 m -- the
+        # refinement was being requested and not happening.
+        #
+        # Measured on this project's own texture, 72 synthetic frames spanning
+        # 1-8 m with two offsets, two blur levels, noise and tilt, scored
+        # against ground truth through the real estimator:
+        #
+        #     default              median 8.6 mm   p90 23.2 mm
+        #     with this line       median 6.9 mm   p90 16.3 mm
+        #
+        # A 30% cut in the p90 for one assignment, and it feeds straight through
+        # to centring: the estimator turns these corners into the pad centre.
+        #
+        # The rest of the published "small marker" tuning set was measured too
+        # and is deliberately NOT adopted: it moved nothing here, and its
+        # `errorCorrectionRate = 1.0` introduced a phantom id in the same 72
+        # frames. Accepting a wrong id to improve a detection rate that is
+        # already 72/72 would be a bad trade.
+        try:
+            params.relativeCornerRefinmentWinSize = 1.0
+        except AttributeError:  # pragma: no cover - older OpenCV
+            logger.warning(
+                "this OpenCV has no relativeCornerRefinmentWinSize; corner "
+                "refinement will be skipped for markers under ~32 px"
+            )
         self._detector = cv2.aruco.ArucoDetector(self._dictionary, params)
         self.dictionary_name = dictionary_name
 

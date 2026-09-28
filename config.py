@@ -704,11 +704,11 @@ extrapolate. That reasoning is sound and the implementation did not follow it:
 a zero *velocity* setpoint asks PX4 to stop moving, not to stay put, so any
 drift that has already happened is never taken back.
 
-Twenty-one measured landings put numbers on the difference:
+Nine measured landings -- three complete deliveries -- put numbers on it:
 
-    offset at commit        mean 0.042 m      (what vision achieves)
-    drift during the commit mean 0.170 m      (what the open-loop stretch adds)
-    touchdown error         mean 0.300 m
+    offset at commit        mean 0.042 m   max 0.065 m   (what vision achieves)
+    drift during the commit mean 0.170 m   max 0.211 m   (the open-loop stretch)
+    touchdown error         mean 0.209 m   max 0.466 m
 
 The controller is roughly four times more accurate than the landing it produces,
 and the whole of the gap is unopposed drift over the last 1.2 m.

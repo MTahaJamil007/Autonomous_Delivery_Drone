@@ -95,3 +95,21 @@ export PX4_SIM_MODEL=x500_delivery
 export PX4_GZ_WORLD=delivery
 
 unset _SIM_DIR _PX4_GZ_ENV
+
+# 5. Keep ROS 2 discovery on the loopback.
+#
+# Every process in this system runs on one machine -- the ros_gz bridges, the
+# avoiders, the vision bridges and the dispatcher all talk over 127.0.0.1 -- so
+# DDS has no reason to look for peers on the network, and looking costs
+# something real when it fails.
+#
+# On 7 Sep 2026 a bridge that came up while `enp0s31f6` and `wwan0` were DOWN
+# wrote "Exception sending a multicast message:Network is unreachable" in a
+# tight loop until ros_gz_bridge_0.log reached 354 MB, and the rest of
+# run_system.sh never came up behind it. ROS_LOCALHOST_ONLY=1 removes the
+# multicast attempt rather than the symptom, and is simply the truth about this
+# deployment.
+#
+# Set it before starting anything; a process that has already joined a DDS
+# domain will not change its mind.
+export ROS_LOCALHOST_ONLY=1

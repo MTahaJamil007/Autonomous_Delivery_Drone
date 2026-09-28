@@ -23,7 +23,12 @@ check: lint import-check repo-checks test ## Run every gate
 install: ## Editable install plus dev extras
 	@# --no-build-isolation because this host's system setuptools (59.6)
 	@# predates PEP 660, and pip's isolated build picks it up and refuses.
-	$(PY) -m pip install --user "setuptools>=68,<80"
+	@# --user is skipped inside a virtualenv (e.g. vision_env): a venv's own
+	@# site-packages already has sys.path precedence over anything in
+	@# ~/.local, so pip refuses --user there with "will lack sys.path
+	@# precedence to setuptools in .../site-packages" instead of silently
+	@# installing somewhere that would not shadow the old one.
+	$(PY) -m pip install $$($(PY) -c 'import sys; print("" if sys.prefix != sys.base_prefix else "--user")') "setuptools>=68,<80"
 	$(PY) -m pip install -e ".[dev]" --no-build-isolation
 
 test: ## Full test suite (bench only; sitl/hitl excluded by pytest.ini)
