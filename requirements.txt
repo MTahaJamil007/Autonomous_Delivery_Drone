@@ -31,4 +31,4 @@ aiohttp>=3.9.0
 # protobuf>=3.20,<3.21
 
 # Development extras: pip install -e ".[dev]"
-# pytest, pytest-asyncio, ruff -- declared in pyproject.toml [project.optional-dependencies]
+# pytest, pytest-asyncio, ruff, httpx -- declared in pyproject.toml [project.optional-dependencies]

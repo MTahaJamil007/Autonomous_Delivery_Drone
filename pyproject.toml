@@ -38,6 +38,10 @@ dev = [
     "pytest>=7.4",
     "pytest-asyncio>=0.21",
     "ruff>=0.6",
+    # fastapi.testclient (tests/test_dispatch_endtoend.py) imports httpx, and
+    # fastapi does not depend on it. It used to be satisfied only by an
+    # unrelated package that happened to be installed on the dev machine.
+    "httpx>=0.23",
 ]
 
 [project.scripts]

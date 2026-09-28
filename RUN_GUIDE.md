@@ -38,9 +38,16 @@ skip and should not.
 
 Set `PX4_DIR` if PX4 lives elsewhere.
 
-A `vision_env/` virtualenv ships in the repo root. It is optional — it was
-created with `include-system-site-packages = true`, so it sees the same
-packages the bare system `python3` does, and adds no isolation on this host.
+**Setting up a new machine from scratch?** Follow
+[docs/MIGRATION.md](docs/MIGRATION.md) first. It installs every row of this
+table at the reference machine's exact versions, and `scripts/verify_env.sh`
+confirms the result.
+
+A `vision_env/` virtualenv may exist in the repo root on the original
+development machine (it is git-ignored, so a fresh clone has none). It is
+optional — it was created with `include-system-site-packages = true`, so it
+sees the same packages the bare system `python3` does, and adds no isolation
+on this host.
 Activate it (`source vision_env/bin/activate`) if you want a dedicated shell
 for this project; everything below works identically with or without it.
 
@@ -439,6 +446,7 @@ what the shipped pad markers can actually be seen across.
 | [CHANGELOG.md](CHANGELOG.md) | History |
 | [docs/LANDING_REWRITE_LOG.md](docs/LANDING_REWRITE_LOG.md) | Flight-by-flight log of the Sep 2026 precision-landing rewrite |
 | [docs/IMPLEMENTATION_REPORT.md](docs/IMPLEMENTATION_REPORT.md) | What changed, what is left, and why |
+| [docs/MIGRATION.md](docs/MIGRATION.md) | Rebuilding the whole environment on a new machine, with expected output per step |
 
 Shareable web versions of this guide (*Dispatch Runbook*) and the handover
 report (*Remediation Handover*) are linked at the top of
