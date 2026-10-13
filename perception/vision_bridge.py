@@ -71,6 +71,12 @@ WHAT CHANGED AND WHY
 8. The topic is a CLI argument. Sensor topics are model-scoped so each drone has
    its own, which is what lets a fleet work at all (finding F7).
 
+9. A live, annotated feed for the dashboard, at
+   http://<host>:<config.camera_stream_port>/stream.mjpg. The callback only
+   hands the frame and its detections to livefeed; drawing and JPEG encoding
+   run on the viewer's thread, once per frame however many tabs are open, and
+   not at all when nobody is watching (perception.camera_overlay).
+
 Usage:
     python3 -m perception.vision_bridge --drone-id drone-0
     python3 -m perception.vision_bridge --drone-id drone-1 --preview
@@ -84,6 +90,7 @@ import logging
 import math
 import socket
 import sys
+import threading
 import time
 
 import cv2
@@ -92,7 +99,8 @@ import numpy as np
 import config
 import world.marker_models as marker_models
 import world.pad_layout as pad_layout
-from perception import pad_estimator
+from livefeed.server import Latest, LiveFeedServer
+from perception import camera_overlay, pad_estimator
 
 logger = logging.getLogger("vision_bridge")
 
@@ -236,7 +244,13 @@ class VisionBridge:
     """Subscribes to one drone's camera and broadcasts its detections."""
 
     def __init__(
-        self, drone_id: str, topic: str, udp_host: str, udp_port: int, preview: bool = False
+        self,
+        drone_id: str,
+        topic: str,
+        udp_host: str,
+        udp_port: int,
+        preview: bool = False,
+        stream_port: int | None = None,
     ):
         self._drone_id = drone_id
         self._topic = topic
@@ -252,6 +266,20 @@ class VisionBridge:
         self._seq = 0
         self._geometry_logged = False
         self._last_ids: tuple[int, ...] = ()
+
+        # Dashboard stream. Rendering is cached per frame so three open tabs
+        # cost one render, and guarded because viewer threads race for it.
+        self._fps = 0.0
+        self._last_frame_t = 0.0
+        self._live = Latest()
+        self._render_lock = threading.Lock()
+        self._rendered: tuple[int, bytes | None] = (-1, None)
+        self._view: LiveFeedServer | None = None
+        if stream_port is not None:
+            self._view = LiveFeedServer(f"camera[{drone_id}]", config.LIVEFEED_HOST, stream_port)
+            self._view.route_mjpeg("/stream.mjpg", self._live, self._render_jpeg, self._idle_jpeg)
+            self._view.route_json("/snapshot.json", self._snapshot_view)
+            self._view.start()
 
     def on_image(self, msg) -> None:
         """Gazebo transport callback. Must stay fast: it blocks the subscriber.
@@ -354,8 +382,46 @@ class VisionBridge:
                 logger.info("no markers in view")
             self._last_ids = ids
 
+        if self._last_frame_t:
+            period = now - self._last_frame_t
+            if period > 0:
+                self._fps = 1.0 / period if not self._fps else 0.9 * self._fps + 0.1 / period
+        self._last_frame_t = now
+        if self._view is not None:
+            # A reference, not a copy: `image` is a fresh array per frame and
+            # nothing below mutates it except the opt-in preview, which draws
+            # on its own copy.
+            self._live.publish((image, raw, pads, self._seq, self._fps))
+
         if self._preview:
-            self._show(image, detections)
+            self._show(image.copy(), detections)
+
+    # ── dashboard stream (viewer threads only) ──────────────────────────────
+
+    def _render_jpeg(self, _seq: int, frame) -> bytes | None:
+        image, raw, pads, seq, fps = frame
+        with self._render_lock:
+            if self._rendered[0] != seq:
+                annotated = camera_overlay.render_frame(image, raw, pads, self._drone_id, fps, seq)
+                self._rendered = (seq, camera_overlay.encode_jpeg(annotated))
+            return self._rendered[1]
+
+    def _idle_jpeg(self, age_s: float | None) -> bytes | None:
+        return camera_overlay.encode_jpeg(camera_overlay.no_signal_frame(self._drone_id, age_s))
+
+    def _snapshot_view(self) -> dict:
+        _seq, frame, published_at = self._live.get()
+        if frame is None:
+            return {"drone_id": self._drone_id, "stale": True}
+        _image, raw, pads, seq, fps = frame
+        return {
+            "drone_id": self._drone_id,
+            "seq": seq,
+            "fps": round(fps, 2),
+            "age_s": round(time.monotonic() - published_at, 2),
+            "markers": sorted(marker_id for marker_id, _ in raw),
+            "pads": pads,
+        }
 
     def _log_geometry(self, width: int, height: int) -> None:
         """Report the live geometry and flag a config mismatch loudly."""
@@ -402,6 +468,8 @@ class VisionBridge:
         cv2.waitKey(1)  # blocking-ok: paired with imshow above
 
     def close(self) -> None:
+        if self._view is not None:
+            self._view.close()
         self._sock.close()
         if self._preview:
             cv2.destroyAllWindows()
@@ -432,6 +500,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Explicitly disable the preview (default behaviour).",
     )
+    parser.add_argument(
+        "--stream-port",
+        type=int,
+        default=None,
+        help="HTTP port for the dashboard's annotated camera stream. "
+        "Default: config.camera_stream_port(drone_id).",
+    )
+    parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="Do not serve the dashboard camera stream.",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -457,7 +537,15 @@ def main(argv: list[str] | None = None) -> int:
     from gz.msgs10.image_pb2 import Image
     from gz.transport13 import Node
 
-    bridge = VisionBridge(args.drone_id, topic, args.udp_host, udp_port, preview)
+    stream_port = None
+    if not args.no_stream:
+        stream_port = (
+            args.stream_port
+            if args.stream_port is not None
+            else config.camera_stream_port(args.drone_id)
+        )
+
+    bridge = VisionBridge(args.drone_id, topic, args.udp_host, udp_port, preview, stream_port)
     node = Node()
 
     if not node.subscribe(Image, topic, bridge.on_image):

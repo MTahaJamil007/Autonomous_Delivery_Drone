@@ -126,6 +126,29 @@ def lidar_port(drone_id: str) -> int:
     return LIDAR_PORT_BASE + PORT_STRIDE * drone_index(drone_id)
 
 
+CAMERA_STREAM_PORT_BASE = 8610
+LIDAR_VIEW_PORT_BASE = 8611
+"""HTTP ports for the dashboard's live views (livefeed.server), one pair per
+drone with the same stride as the UDP ports: drone-1 uses 8620/8621.
+
+Viewer-only. Nothing in the flight path reads these, and a bridge that cannot
+bind one logs a warning and keeps flying."""
+
+LIVEFEED_HOST = "0.0.0.0"
+"""Bind address for the live views. Matches the dispatcher, which also listens
+on all interfaces, so the dashboard works when opened from another machine."""
+
+
+def camera_stream_port(drone_id: str) -> int:
+    """HTTP port of a drone's annotated downward-camera stream."""
+    return CAMERA_STREAM_PORT_BASE + PORT_STRIDE * drone_index(drone_id)
+
+
+def lidar_view_port(drone_id: str) -> int:
+    """HTTP port of a drone's live LiDAR scan and avoider decision."""
+    return LIDAR_VIEW_PORT_BASE + PORT_STRIDE * drone_index(drone_id)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Avoider thresholds
 # ─────────────────────────────────────────────────────────────────────────────
@@ -658,6 +681,19 @@ OBSTACLE_MEMORY_PORT = 5050
 # ─────────────────────────────────────────────────────────────────────────────
 
 GZ_WORLD = "delivery"
+
+GZ_WORLD_ORIGIN_LAT = 30.0314722223
+GZ_WORLD_ORIGIN_LON = 72.3140833333
+"""The GPS position of the Gazebo world's (0, 0): sim/worlds/delivery.sdf's
+<spherical_coordinates>. `make repo-checks` fails if the two drift apart.
+
+EVERY GPS -> GAZEBO CONVERSION MUST USE THIS, never the mission's home. Gazebo
+places models in its own world frame. The mission used to convert pad and
+cargo positions relative to wherever the drone armed, which only equals the
+world origin when the drone happens to take off from (0, 0). After an RTL that
+lands somewhere else -- or for any fleet drone but drone-0, which world/
+spawn_fleet.sh spawns SPAWN_SPACING_M apart -- every pad appeared offset by the
+drone's starting position, and the landing search found bare ground."""
 GZ_MODEL_BASE = "x500_delivery"
 """PX4 spawns the model as f"{GZ_MODEL_BASE}_{instance}" -- see
 ROMFS/px4fmu_common/init.d-posix/px4-rc.gzsim. Model-scoped sensor topics are

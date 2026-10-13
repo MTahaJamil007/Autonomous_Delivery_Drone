@@ -58,7 +58,8 @@ import drone_agent.safety_supervisor, drone_agent.payload, drone_agent.battery; 
 import drone_agent.udp_receiver, drone_agent.gz_client, drone_agent.px4_params; \
 import drone_web.drone_logic, fleet_dispatch.app, fleet_dispatch.db; \
 import global_planner.detour, obstacle_memory_service.app; \
-import perception.vision_bridge, world.marker_models; \
+import perception.vision_bridge, perception.camera_overlay, livefeed.server; \
+import world.marker_models; \
 from drone_web.drone_logic import execute_delivery, get_state_snapshot; \
 print('  import-check: every module imports from /tmp')"
 

@@ -35,6 +35,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import aiohttp
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -246,8 +247,23 @@ async def _drain_queue() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    # Each drone's live sensor views run in that drone's own vision bridge and
+    # avoider, on ports derived here so the page never hardcodes one.
+    streams = {
+        drone_id: {
+            "camera": config.camera_stream_port(drone_id),
+            "lidar": config.lidar_view_port(drone_id),
+        }
+        for drone_id in config.DRONE_IDS
+    }
     return templates.TemplateResponse(
-        request=request, name="index.html", context={"fleet_size": config.FLEET_SIZE}
+        request=request,
+        name="index.html",
+        context={
+            "fleet_size": config.FLEET_SIZE,
+            "streams": streams,
+            "origin": (config.GZ_WORLD_ORIGIN_LAT, config.GZ_WORLD_ORIGIN_LON),
+        },
     )
 
 
@@ -299,6 +315,39 @@ async def fleet_status() -> dict:
         # Distinguishes "flying" from "marked BUSY but nothing is running".
         drone["mission_live"] = drone.get("current_job_id") in _missions
     return {"fleet_size": len(drones), "drones": drones}
+
+
+@app.get("/fleet/live")
+async def fleet_live() -> dict:
+    """The same payload the /ws socket streams, for a client polling instead.
+
+    The page falls back to this when its socket cannot connect. That fallback
+    exists because the socket once failed on every connection -- uvicorn had no
+    websocket library installed, logged a warning nobody read, and answered
+    404 -- and the page sat on "connecting..." with an empty map for a whole
+    flight while every number it needed was one GET away.
+    """
+    return await _fleet_payload()
+
+
+@app.get("/map/obstacles")
+async def map_obstacles() -> dict:
+    """Obstacles the fleet has reported, for the map. Never raises.
+
+    Proxied rather than fetched by the browser because the obstacle service
+    binds to localhost only, and a dashboard opened from another machine must
+    still show what the drones have learned.
+    """
+    url = f"http://127.0.0.1:{config.OBSTACLE_MEMORY_PORT}/obstacles"
+    try:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(url, timeout=aiohttp.ClientTimeout(total=2.0)) as response,
+        ):
+            data = await response.json()
+            return {"obstacles": data.get("obstacles", [])}
+    except Exception as exc:  # noqa: BLE001 - the map degrades, it does not fail
+        return {"obstacles": [], "error": f"{type(exc).__name__}: {exc}"}
 
 
 @app.get("/jobs")
@@ -368,20 +417,30 @@ async def websocket_fleet(websocket: WebSocket) -> None:
     await websocket.accept()
     try:
         while True:
-            drones = await fleet_db.get_all_drones()
-            for drone in drones:
-                drone["mission_live"] = drone.get("current_job_id") in _missions
-            recent = await fleet_db.get_all_jobs(limit=10)
-            await websocket.send_json(
-                {
-                    "drones": drones,
-                    "recent_jobs": recent,
-                    "queued": sum(1 for j in recent if j["status"] == JobStatus.QUEUED.value),
-                }
-            )
+            await websocket.send_json(await _fleet_payload())
             await asyncio.sleep(WEBSOCKET_INTERVAL_S)
     except WebSocketDisconnect:
         logger.debug("fleet websocket closed")
+
+
+async def _fleet_payload() -> dict:
+    """Registry rows, recent jobs, and each flying drone's live state.
+
+    `live` comes straight from the mission object in this process -- position,
+    heading, FSM state, avoider action -- at the socket's rate. The database
+    rows are only refreshed by the 2 s heartbeat, which made the map marker
+    jump rather than move.
+    """
+    drones = await fleet_db.get_all_drones()
+    for drone in drones:
+        drone["mission_live"] = drone.get("current_job_id") in _missions
+    recent = await fleet_db.get_all_jobs(limit=10)
+    return {
+        "drones": drones,
+        "live": {drone["id"]: get_state_snapshot(drone["id"]) for drone in drones},
+        "recent_jobs": recent,
+        "queued": sum(1 for j in recent if j["status"] == JobStatus.QUEUED.value),
+    }
 
 
 if __name__ == "__main__":

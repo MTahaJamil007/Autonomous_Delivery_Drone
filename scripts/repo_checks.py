@@ -117,6 +117,20 @@ def check_schema() -> list[str]:
         if f"<{tag}>{want}</{tag}>" not in model:
             problems.append(f"x500_delivery/model.sdf: <{tag}> does not match config ({want})")
 
+    # Gazebo places spawned pads and cargo in its world frame; the mission
+    # converts GPS to that frame with config's origin. A mismatch puts every
+    # pad somewhere the drone will never search.
+    world = (PROJECT_ROOT / "sim" / "worlds" / f"{config.GZ_WORLD}.sdf").read_text()
+    for tag, want in (
+        ("latitude_deg", config.GZ_WORLD_ORIGIN_LAT),
+        ("longitude_deg", config.GZ_WORLD_ORIGIN_LON),
+    ):
+        found = re.search(rf"<{tag}>\s*([-0-9.]+)\s*</{tag}>", world)
+        if not found or abs(float(found.group(1)) - want) > 1e-9:
+            problems.append(
+                f"{config.GZ_WORLD}.sdf: <{tag}> does not match config.GZ_WORLD_ORIGIN ({want})"
+            )
+
     # Strip comments: the file discusses <topic> at length explaining its absence.
     without_comments = re.sub(r"(?s)<!--.*?-->", "", model)
     if "<topic>" in without_comments:

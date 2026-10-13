@@ -12,146 +12,384 @@
 
     <style>
         :root {
-            --bg: #1a1d21; --panel: #22262b; --line: #33383f;
-            --text: #e8eaed; --muted: #9aa0a6;
-            --ok: #34a853; --busy: #4285f4; --warn: #fbbc04; --bad: #ea4335;
+            color-scheme: dark;
+            --bg: #131518; --panel: #1b1e22; --card: #202429; --raised: #272c32;
+            --line: #2f353c; --line-soft: #262b31;
+            --text: #eceef0; --text-2: #b4bac1; --muted: #858c94;
+            /* Status palette (fixed, never reused for identity). Always paired
+               with an icon and a label, never colour alone. */
+            --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+            /* Identity: categorical slots, dark steps, in fixed order. */
+            --pickup: #d95926; --drop: #199e70; --home: #9085e9; --series: #3987e5;
+            --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         }
         * { box-sizing: border-box; }
-        body { margin: 0; font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        html, body { height: 100%; }
+        body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
                background: var(--bg); color: var(--text); }
-        #layout { display: flex; flex-direction: column; height: 100vh; }
-        #map { flex: 1 1 auto; min-height: 0; }
-        #panel { flex: 0 0 auto; background: var(--panel); border-top: 1px solid var(--line);
-                 padding: 10px 14px; max-height: 42vh; overflow-y: auto; }
+        .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+        /* ── layout ─────────────────────────────────────────────────────── */
+        #app { display: grid; height: 100vh; grid-template-rows: auto 1fr;
+               grid-template-columns: minmax(0, 1fr) 460px; }
+        header { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px;
+                 padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+        header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .01em; }
+        header .logo { width: 22px; height: 22px; }
+        #main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+        #map { flex: 1 1 auto; min-height: 260px; }
+        #panel { flex: 0 0 auto; max-height: 40vh; overflow-y: auto; background: var(--panel);
+                 border-top: 1px solid var(--line); padding: 12px 16px; }
+        #side { background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto;
+                padding: 12px; display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+        @media (max-width: 1100px) {
+            #app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto; height: auto; }
+            #map { height: 55vh; flex: none; }
+            #panel { max-height: none; }
+            #side { border-left: 0; border-top: 1px solid var(--line); }
+        }
+
+        /* ── generic pieces ─────────────────────────────────────────────── */
+        .spacer { flex: 1; }
+        .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
+                border-radius: 999px; background: var(--raised); color: var(--text-2);
+                font-size: 12px; font-weight: 600; white-space: nowrap; }
+        .chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+        .chip.good .dot { background: var(--good); }
+        .chip.warning .dot { background: var(--warning); }
+        .chip.critical .dot { background: var(--critical); }
+        .chip.good .dot, .chip.live .dot { box-shadow: 0 0 0 0 rgba(12,163,12,.6); animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(12,163,12,.55); }
+                           70% { box-shadow: 0 0 0 7px rgba(12,163,12,0); } 100% { box-shadow: none; } }
+        button { padding: 8px 16px; font: inherit; font-weight: 600; cursor: pointer; border: none;
+                 border-radius: 6px; background: var(--good); color: #fff; }
+        button.secondary { background: var(--raised); color: var(--text); border: 1px solid var(--line); }
+        button.ghost { background: transparent; color: var(--text-2); padding: 4px 8px; border: 1px solid var(--line); }
+        button.danger { background: transparent; color: #f28b82; border: 1px solid rgba(208,59,59,.5);
+                        padding: 3px 10px; font-size: 12px; }
+        button:disabled { background: var(--raised); color: var(--muted); cursor: not-allowed; }
+        .hint { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+        h3 { margin: 16px 0 4px; font-size: 11.5px; color: var(--muted); text-transform: uppercase;
+             letter-spacing: .06em; font-weight: 650; }
         .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-        button { padding: 8px 16px; font-size: 14px; cursor: pointer; border: none;
-                 border-radius: 5px; background: var(--ok); color: #fff; font-weight: 600; }
-        button.secondary { background: #4a5058; }
-        button:disabled { background: #3a3f46; color: var(--muted); cursor: not-allowed; }
-        .hint { color: var(--muted); font-size: 12.5px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
-        th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line);
-                 vertical-align: top; }
-        th { color: var(--muted); font-weight: 600; font-size: 11.5px;
-             text-transform: uppercase; letter-spacing: .04em; }
-        .pill { display: inline-block; padding: 1px 8px; border-radius: 10px;
-                font-size: 11.5px; font-weight: 700; }
-        .s-AVAILABLE, .s-COMPLETED { background: rgba(52,168,83,.18); color: #6ee7a0; }
-        .s-BUSY, .s-IN_PROGRESS, .s-ASSIGNED { background: rgba(66,133,244,.18); color: #8ab4f8; }
-        .s-QUEUED { background: rgba(251,188,4,.18); color: #fdd663; }
-        .s-FAILED, .s-ABORTED, .s-ERROR, .s-OFFLINE { background: rgba(234,67,53,.18); color: #f28b82; }
+
+        .tablewrap { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+        th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+        .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11.5px; font-weight: 700; }
+        .s-AVAILABLE, .s-COMPLETED { background: rgba(12,163,12,.16); color: #7ddc7d; }
+        .s-BUSY, .s-IN_PROGRESS, .s-ASSIGNED { background: rgba(57,135,229,.18); color: #8ab4f8; }
+        .s-QUEUED { background: rgba(250,178,25,.16); color: #fdd663; }
+        .s-FAILED, .s-ABORTED, .s-ERROR, .s-OFFLINE { background: rgba(208,59,59,.18); color: #f28b82; }
         /* The reason column is the point of this table. It wraps rather than
            truncating: a failure whose explanation is cut off is a failure the
            operator still has to go and dig out of a log. */
-        .reason { color: #f28b82; font-family: ui-monospace, SFMono-Regular, monospace;
-                  font-size: 12px; word-break: break-word; max-width: 46ch; }
-        .detail { color: var(--muted); font-size: 12px; }
-        h3 { margin: 14px 0 0; font-size: 12px; color: var(--muted);
-             text-transform: uppercase; letter-spacing: .05em; }
-        #banner { display: none; margin-top: 8px; padding: 8px 10px; border-radius: 5px;
-                  background: rgba(234,67,53,.14); border: 1px solid rgba(234,67,53,.4);
-                  color: #f28b82; font-size: 13px; }
+        .reason { color: #f28b82; font-family: var(--mono); font-size: 12px; word-break: break-word; max-width: 52ch; }
+        .detail { color: var(--text-2); font-size: 12.5px; }
+        #banner { display: none; margin-top: 10px; padding: 8px 12px; border-radius: 6px;
+                  background: rgba(208,59,59,.12); border: 1px solid rgba(208,59,59,.4); color: #f28b82; font-size: 13px; }
+
+        /* ── sensor cards ───────────────────────────────────────────────── */
+        .card { flex: none; background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+        .ghost svg { width: 14px; height: 14px; display: block; }
+        .card-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--line-soft); }
+        .card-head .title { font-weight: 650; font-size: 13px; }
+        .card-head .sub { color: var(--muted); font-size: 12px; }
+        .card-body { padding: 12px; }
+        .card:fullscreen { overflow-y: auto; border-radius: 0; }
+        .card:fullscreen .camwrap { max-width: min(100%, 133vh); margin: 0 auto; }
+        .card:fullscreen #radar { max-width: min(100%, 70vh); }
+
+        #droneTabs { display: flex; gap: 6px; flex-wrap: wrap; }
+        #droneTabs button { background: var(--raised); color: var(--text-2); border: 1px solid var(--line);
+                            padding: 4px 12px; font-size: 12.5px; }
+        #droneTabs button.active { color: var(--text); border-color: var(--series); background: rgba(57,135,229,.15); }
+
+        .camwrap { position: relative; aspect-ratio: 4 / 3; background: #0b0c0e; }
+        .camwrap img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
+        .camwrap .offline { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+                            flex-direction: column; gap: 6px; color: var(--text-2); text-align: center; padding: 20px; }
+        .camwrap.down .offline { display: flex; }
+        .camwrap.down img { visibility: hidden; }
+        .offline strong { color: #f28b82; font-size: 15px; letter-spacing: .08em; }
+
+        .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--line-soft); }
+        .tile { background: var(--card); padding: 8px 10px; min-width: 0; }
+        .tile .k { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; }
+        .tile .v { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .tile .v small { font-size: 11.5px; color: var(--text-2); font-weight: 500; margin-left: 2px; }
+
+        .status { white-space: nowrap; display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px; border-radius: 7px;
+                  font-weight: 750; font-size: 12.5px; letter-spacing: .04em; border: 1px solid; }
+        .status svg { width: 14px; height: 14px; }
+        .st-good { color: var(--good); border-color: rgba(12,163,12,.45); background: rgba(12,163,12,.1); }
+        .st-warning { color: var(--warning); border-color: rgba(250,178,25,.45); background: rgba(250,178,25,.1); }
+        .st-serious { color: var(--serious); border-color: rgba(236,131,90,.45); background: rgba(236,131,90,.1); }
+        .st-critical { color: #f07070; border-color: rgba(208,59,59,.6); background: rgba(208,59,59,.14); }
+        .st-critical.blink { animation: blink 1s steps(2) infinite; }
+        @keyframes blink { 50% { opacity: .55; } }
+
+        #radar { display: block; width: 100%; aspect-ratio: 1; margin: 0 auto; }
+        .sectors { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+        .sector { background: var(--raised); border-radius: 8px; padding: 8px 10px; border-left: 3px solid var(--line); }
+        .sector .k { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; }
+        .sector .v { font-size: 18px; font-weight: 650; }
+        .sector .v small { font-size: 12px; color: var(--text-2); font-weight: 500; }
+        .sector.b-good { border-left-color: var(--good); }
+        .sector.b-warning { border-left-color: var(--warning); }
+        .sector.b-critical { border-left-color: var(--critical); }
+
+        .dodgebar { margin-top: 10px; display: none; }
+        .dodgebar.on { display: block; }
+        .dodgebar .track { height: 6px; background: var(--raised); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+        .dodgebar .fill { height: 100%; width: 0; background: var(--warning); border-radius: 3px; transition: width .15s linear; }
+        .dodgebar .lbl { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-2); }
+
+        .sparkwrap { position: relative; margin-top: 12px; }
+        .sparkwrap .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+        #spark { display: block; width: 100%; height: 92px; }
+        #sparkTip { position: absolute; pointer-events: none; display: none; background: var(--raised);
+                    border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font-size: 12px; white-space: nowrap; }
+
+        .events { margin-top: 12px; }
+        .events ol { list-style: none; margin: 4px 0 0; padding: 0; max-height: 150px; overflow-y: auto; }
+        .events li { display: grid; grid-template-columns: 64px 1fr auto; gap: 8px; padding: 4px 0;
+                     border-bottom: 1px solid var(--line-soft); font-size: 12.5px; }
+        .events .t { color: var(--muted); }
+        .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--text-2); margin-top: 8px; }
+        .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+        .legend i.ring { border-radius: 0; height: 0; width: 14px; border-top: 2px dashed; vertical-align: 3px; }
+
+        .leaflet-popup-content { font-size: 13px; }
+        .drone-icon { transition: transform .4s linear; }
     </style>
 </head>
 <body>
-<div id="layout">
-    <div id="map"></div>
+<div id="app">
+    <header>
+        <svg class="logo" viewBox="0 0 48 48" fill="none" stroke="#3987e5" stroke-width="3" stroke-linecap="round">
+            <path d="M24 16v16M16 24h16M12 12l5 5M36 12l-5 5M12 36l5-5M36 36l-5-5"/>
+            <circle cx="24" cy="24" r="6" fill="#3987e5"/><circle cx="12" cy="12" r="4"/>
+            <circle cx="36" cy="12" r="4"/><circle cx="12" cy="36" r="4"/><circle cx="36" cy="36" r="4"/>
+        </svg>
+        <h1>Drone Command Center</h1>
+        <span class="chip" id="fleetSummary">—</span>
+        <span class="spacer"></span>
+        <span class="chip" id="linkChip"><span class="dot"></span><span>connecting…</span></span>
+    </header>
 
-    <div id="panel">
-        <div class="row">
-            <strong id="headline">Awaiting dispatch</strong>
-            <span class="hint" id="fleetSummary"></span>
-            <span style="flex:1"></span>
-            <button id="dispatchBtn" disabled>Dispatch</button>
-            <button class="secondary" onclick="location.reload()">Clear pins</button>
+    <div id="main">
+        <div id="map"></div>
+
+        <div id="panel">
+            <div class="row">
+                <strong id="headline">Click the map twice to set pickup and drop-off</strong>
+                <span class="spacer"></span>
+                <button class="secondary" id="followBtn" title="Keep the map centred on the selected drone">Follow drone</button>
+                <button class="secondary" id="clearBtn">Clear pins</button>
+                <button id="dispatchBtn" disabled>Dispatch</button>
+            </div>
+            <div class="hint">
+                Search for a place, then click the map twice: first click sets the pickup pad (ArUco ID 0),
+                second sets the drop-off (ID 1). The home pad carries ID 2.
+            </div>
+            <div id="banner"></div>
+
+            <h3>Fleet</h3>
+            <div class="tablewrap"><table>
+                <thead><tr>
+                    <th>Drone</th><th>Status</th><th>Mission state</th><th>Position</th>
+                    <th>Alt</th><th>Battery</th><th>Detail</th><th></th>
+                </tr></thead>
+                <tbody id="fleetRows"><tr><td colspan="8" class="detail">connecting…</td></tr></tbody>
+            </table></div>
+
+            <h3>Recent jobs</h3>
+            <div class="tablewrap"><table>
+                <thead><tr><th>Job</th><th>Status</th><th>Drone</th><th>Reason / detail</th></tr></thead>
+                <tbody id="jobRows"><tr><td colspan="4" class="detail">none yet</td></tr></tbody>
+            </table></div>
         </div>
-        <div class="hint">
-            Search for a place, then click the map twice: first click sets the pickup pad,
-            second sets the drop-off. Landing pads spawn at those coordinates with ArUco
-            IDs 0 and 1; the home pad carries ID 2.
-        </div>
-        <div id="banner"></div>
-
-        <h3>Fleet</h3>
-        <table>
-            <thead><tr>
-                <th>Drone</th><th>Status</th><th>Job</th><th>Position</th>
-                <th>Alt</th><th>Battery</th><th>Detail</th>
-            </tr></thead>
-            <tbody id="fleetRows"><tr><td colspan="7" class="detail">connecting…</td></tr></tbody>
-        </table>
-
-        <h3>Recent jobs</h3>
-        <table>
-            <thead><tr>
-                <th>Job</th><th>Status</th><th>Drone</th><th>Reason / detail</th>
-            </tr></thead>
-            <tbody id="jobRows"><tr><td colspan="4" class="detail">none yet</td></tr></tbody>
-        </table>
     </div>
+
+    <aside id="side">
+        <div id="droneTabs"></div>
+
+        <!-- ── Downward camera ─────────────────────────────────────────── -->
+        <section class="card" id="camCard">
+            <div class="card-head">
+                <span class="title">Downward camera</span>
+                <span class="sub" id="camSub">ArUco landing vision</span>
+                <span class="spacer"></span>
+                <span class="chip" id="camChip"><span class="dot"></span><span>—</span></span>
+                <button class="ghost" data-fullscreen="camCard" title="Full screen" aria-label="Full screen"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>
+            </div>
+            <div class="camwrap down" id="camWrap">
+                <img id="camImg" alt="Annotated downward camera feed" />
+                <div class="offline">
+                    <strong>CAMERA OFFLINE</strong>
+                    <span id="camOfflineWhy">waiting for the vision bridge…</span>
+                    <span class="hint num" id="camOfflineUrl"></span>
+                </div>
+            </div>
+            <div class="tiles">
+                <div class="tile" style="grid-column: span 2"><div class="k">Mission</div><div class="v" id="tFsm">—</div></div>
+                <div class="tile"><div class="k">Altitude</div><div class="v num" id="tAlt">—</div></div>
+                <div class="tile"><div class="k">Battery</div><div class="v num" id="tBat">—</div></div>
+                <div class="tile" style="grid-column: span 2"><div class="k">Markers in view</div><div class="v num" id="tMarkers">—</div></div>
+                <div class="tile"><div class="k">Heading</div><div class="v num" id="tHdg">—</div></div>
+                <div class="tile"><div class="k">Camera</div><div class="v num" id="tFps">—</div></div>
+            </div>
+        </section>
+
+        <!-- ── LiDAR ───────────────────────────────────────────────────── -->
+        <section class="card" id="lidarCard">
+            <div class="card-head">
+                <span class="title">LiDAR avoidance</span>
+                <span class="spacer"></span>
+                <span id="actionBadge" class="status st-serious">—</span>
+                <button class="ghost" data-fullscreen="lidarCard" title="Full screen" aria-label="Full screen"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg></button>
+            </div>
+            <div class="card-body">
+                <canvas id="radar" width="800" height="800" aria-label="Top-down LiDAR scan, forward is up"></canvas>
+                <div class="legend">
+                    <span><i style="background:var(--critical)"></i>closer than safe</span>
+                    <span><i style="background:var(--warning)"></i>inside clear band</span>
+                    <span><i style="background:#8fb6e8"></i>open</span>
+                    <span><i class="ring" style="border-color:var(--critical)"></i>safe <span id="lgSafe"></span></span>
+                    <span><i class="ring" style="border-color:var(--good)"></i>clear <span id="lgClear"></span></span>
+                </div>
+
+                <div class="sectors">
+                    <div class="sector" id="secL"><div class="k">Left (median)</div><div class="v num">—</div></div>
+                    <div class="sector" id="secF"><div class="k">Front (effective)</div><div class="v num">—</div></div>
+                    <div class="sector" id="secR"><div class="k">Right (median)</div><div class="v num">—</div></div>
+                </div>
+
+                <div class="dodgebar" id="dodgeBar">
+                    <div class="lbl"><span id="dodgeTxt">Dodging</span><span id="dodgeLimit"></span></div>
+                    <div class="track"><div class="fill" id="dodgeFill"></div></div>
+                </div>
+
+                <div class="sparkwrap">
+                    <div class="lbl">Front clearance, last 60 s</div>
+                    <canvas id="spark" aria-label="Front clearance over the last 60 seconds"></canvas>
+                    <div id="sparkTip" class="num"></div>
+                </div>
+
+                <div class="events">
+                    <div class="lbl" style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">
+                        Avoider decisions</div>
+                    <ol id="events"><li><span class="t">—</span><span class="detail">no transitions yet</span><span></span></li></ol>
+                </div>
+            </div>
+        </section>
+    </aside>
 </div>
 
 <script>
-// World origin, matching sim/worlds/delivery.sdf's <spherical_coordinates>. If
-// these two drift apart, the map draws the drone in the wrong place while every
-// number in the system is internally consistent -- which is a painful bug to
-// chase, so keep them in sync deliberately.
-const ORIGIN = [30.0314722, 72.3140833];
+// World origin: config.GZ_WORLD_ORIGIN_LAT/LON, which `make repo-checks` holds
+// equal to sim/worlds/delivery.sdf's <spherical_coordinates>.
+const ORIGIN = [{{ origin[0] }}, {{ origin[1] }}];
 const FLEET_SIZE = {{ fleet_size }};
+// Per-drone live-view ports, from config.camera_stream_port / lidar_view_port.
+const STREAMS = {{ streams | tojson }};
 
+// Identity colours: categorical slots in fixed order. Pads take three slots,
+// drones the rest, so a drone is never the colour of a pad.
+const DRONE_COLOURS = ['#3987e5', '#c98500', '#d55181', '#008300', '#e66767'];
+const PAD = { pickup: '#d95926', drop: '#199e70', home: '#9085e9' };
+const ST = { good: '#0ca30c', warning: '#fab219', serious: '#ec835a', critical: '#d03b3b' };
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = (v, d) => (v === null || v === undefined || Number.isNaN(v)) ? '—' : Number(v).toFixed(d);
+const droneColour = id => DRONE_COLOURS[(parseInt(String(id).split('-')[1], 10) || 0) % DRONE_COLOURS.length];
+const feedUrl = (port, path) => `${location.protocol}//${location.hostname}:${port}${path}`;
+
+let selected = Object.keys(STREAMS)[0] || 'drone-0';
+let lastPayload = null;
+
+// ══════════════════════════════════════════════════════════════════════════
+//  Map
+// ══════════════════════════════════════════════════════════════════════════
 const satellite = L.tileLayer(
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    { maxZoom: 19, attribution: 'Esri' });
+    { maxZoom: 21, maxNativeZoom: 19, attribution: 'Esri' });
 const street = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    { maxZoom: 19, attribution: 'OpenStreetMap' });
-
-const map = L.map('map', { center: ORIGIN, zoom: 17, layers: [satellite] });
+    { maxZoom: 21, maxNativeZoom: 19, attribution: 'OpenStreetMap' });
+const map = L.map('map', { center: ORIGIN, zoom: 18, layers: [satellite] });
 L.control.layers({ 'Satellite': satellite, 'Street': street }).addTo(map);
-
-const geocoder = L.Control.geocoder({ defaultMarkGeocode: false,
-                                      placeholder: 'Search address or city…' }).addTo(map);
+L.control.scale({ imperial: false }).addTo(map);
+const geocoder = L.Control.geocoder({ defaultMarkGeocode: false, placeholder: 'Search address or city…' }).addTo(map);
 geocoder.on('markgeocode', e => map.fitBounds(e.geocode.bbox));
 
-// Per-drone colours so three drones are distinguishable at a glance. The old
-// map had exactly one hardcoded marker, which is all a single-drone
-// architecture could ever show.
-const COLOURS = ['#00d1ff', '#ffb300', '#b388ff', '#69f0ae', '#ff8a80',
-                 '#80d8ff', '#ccff90', '#ea80fc', '#ffd180', '#a7ffeb'];
-
-function droneIcon(colour) {
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 48 48">
-        <g fill="none" stroke="${colour}" stroke-width="3" stroke-linecap="round">
-        <path d="M24 16v16M16 24h16"/><path d="M12 12l5 5M36 12l-5 5M12 36l5-5M36 36l-5-5"/>
-        <circle cx="24" cy="24" r="6" fill="${colour}"/>
-        <circle cx="12" cy="12" r="3" fill="${colour}"/><circle cx="36" cy="12" r="3" fill="${colour}"/>
-        <circle cx="12" cy="36" r="3" fill="${colour}"/><circle cx="36" cy="36" r="3" fill="${colour}"/>
-        </g></svg>`;
+function padIcon(colour, label) {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 30 30">
+        <rect x="3" y="3" width="24" height="24" rx="5" fill="${colour}" stroke="#fff" stroke-width="2"/>
+        <text x="15" y="20" font-family="system-ui,sans-serif" font-size="13" font-weight="700"
+              text-anchor="middle" fill="#fff">${label}</text></svg>`;
     return L.icon({ iconUrl: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg),
-                    iconSize: [26, 26], iconAnchor: [13, 13], popupAnchor: [0, -16] });
+                    iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -14] });
 }
 
-const markers = {};   // drone_id -> Leaflet marker
-const trails  = {};   // drone_id -> polyline of flown positions
+function droneIcon(colour, heading) {
+    // A divIcon so the arrow can rotate with the drone's real heading.
+    const html = `<svg class="drone-icon" style="transform: rotate(${heading || 0}deg)" width="38" height="38" viewBox="0 0 48 48">
+        <circle cx="24" cy="24" r="21" fill="${colour}" fill-opacity=".18" stroke="${colour}" stroke-width="1.5"/>
+        <g stroke="#fff" stroke-width="2.4" stroke-linecap="round">
+          <path d="M15 15l18 18M33 15L15 33"/></g>
+        <g fill="${colour}" stroke="#fff" stroke-width="1.5">
+          <circle cx="14" cy="14" r="4.5"/><circle cx="34" cy="14" r="4.5"/>
+          <circle cx="14" cy="34" r="4.5"/><circle cx="34" cy="34" r="4.5"/></g>
+        <path d="M24 3l6 9h-12z" fill="#fff"/>
+        <circle cx="24" cy="24" r="4" fill="#fff"/></svg>`;
+    return L.divIcon({ html, className: '', iconSize: [38, 38], iconAnchor: [19, 19], popupAnchor: [0, -18] });
+}
+
+L.marker(ORIGIN, { icon: padIcon(PAD.home, 'H') }).addTo(map).bindTooltip('Home pad · ArUco 2');
+
+const markers = {}, trails = {}, lastHeading = {};
 let pickupPin = null, dropPin = null;
+const jobPins = L.layerGroup().addTo(map);
+const obstacleLayer = L.layerGroup().addTo(map);
+let shownJob = null;
+let follow = false;
 
 map.on('click', e => {
     if (!pickupPin) {
-        pickupPin = L.marker(e.latlng).addTo(map)
-            .bindPopup('Pickup — ArUco ID 0').openPopup();
+        pickupPin = L.marker(e.latlng, { icon: padIcon(PAD.pickup, 'P') }).addTo(map)
+            .bindTooltip('Pickup · ArUco 0', { permanent: false });
+        $('headline').textContent = 'Now click the drop-off point';
     } else if (!dropPin) {
-        dropPin = L.marker(e.latlng).addTo(map)
-            .bindPopup('Drop-off — ArUco ID 1').openPopup();
-        document.getElementById('dispatchBtn').disabled = false;
+        dropPin = L.marker(e.latlng, { icon: padIcon(PAD.drop, 'D') }).addTo(map)
+            .bindTooltip('Drop-off · ArUco 1');
+        $('dispatchBtn').disabled = false;
+        $('headline').textContent = 'Ready to dispatch';
     }
 });
 
+function clearPins() {
+    [pickupPin, dropPin].forEach(p => p && map.removeLayer(p));
+    pickupPin = dropPin = null;
+    $('dispatchBtn').disabled = true;
+    $('headline').textContent = 'Click the map twice to set pickup and drop-off';
+}
+$('clearBtn').onclick = clearPins;
+$('followBtn').onclick = function () {
+    follow = !follow;
+    this.textContent = follow ? 'Following ✓' : 'Follow drone';
+    if (follow && markers[selected]) map.panTo(markers[selected].getLatLng());
+};
+
 function showBanner(text) {
-    const el = document.getElementById('banner');
-    el.textContent = text;
-    el.style.display = text ? 'block' : 'none';
+    $('banner').textContent = text;
+    $('banner').style.display = text ? 'block' : 'none';
 }
 
-document.getElementById('dispatchBtn').onclick = function () {
+$('dispatchBtn').onclick = function () {
     const btn = this;
     btn.disabled = true;
     showBanner('');
@@ -159,117 +397,541 @@ document.getElementById('dispatchBtn').onclick = function () {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             pickup_lat: pickupPin.getLatLng().lat, pickup_lon: pickupPin.getLatLng().lng,
-            drop_lat: dropPin.getLatLng().lat,     drop_lon: dropPin.getLatLng().lng,
+            drop_lat: dropPin.getLatLng().lat, drop_lon: dropPin.getLatLng().lng,
         }),
     })
     .then(r => r.json())
     .then(data => {
-        document.getElementById('headline').textContent = data.message;
+        $('headline').textContent = data.message;
         if (data.status === 'Error') showBanner('Dispatch rejected: ' + data.message);
-        // Re-enable unless a drone actually took the job, so a queued or
-        // rejected dispatch can be retried without reloading the page.
-        if (data.status !== 'Success') btn.disabled = false;
+        if (data.status === 'Success') {
+            [pickupPin, dropPin].forEach(p => p && map.removeLayer(p));   // job pins take over
+            pickupPin = dropPin = null;
+            if (data.drone_id) selectDrone(data.drone_id);
+        } else {
+            btn.disabled = false;   // a queued or rejected dispatch can be retried
+        }
     })
-    .catch(err => {
-        showBanner('Dispatch request failed: ' + err);
-        btn.disabled = false;
-    });
+    .catch(err => { showBanner('Dispatch request failed: ' + err); btn.disabled = false; });
 };
 
-function fmt(value, digits) {
-    return (value === null || value === undefined) ? '—' : Number(value).toFixed(digits);
+function abortJob(jobId) {
+    if (!confirm(`Abort job ${jobId}? The drone stops its mission where it is.`)) return;
+    fetch(`/jobs/${jobId}/abort`, { method: 'POST' }).then(r => r.json())
+        .then(d => $('headline').textContent = d.message || `Aborting ${jobId}`);
 }
 
-function renderFleet(drones) {
-    const body = document.getElementById('fleetRows');
-    if (!drones.length) {
-        body.innerHTML = '<tr><td colspan="7" class="detail">no drones registered</td></tr>';
-        return;
-    }
+function drawJobPins(jobs) {
+    // Pins for the job in flight, from the database, so they survive a reload.
+    const active = jobs.find(j => ['ASSIGNED', 'IN_PROGRESS'].includes(j.status));
+    const key = active ? active.id : null;
+    if (key === shownJob) return;
+    shownJob = key;
+    jobPins.clearLayers();
+    if (!active) return;
+    L.marker([active.pickup_lat, active.pickup_lon], { icon: padIcon(PAD.pickup, 'P') })
+        .bindTooltip(`Pickup · ArUco 0 · job ${active.id}`).addTo(jobPins);
+    L.marker([active.drop_lat, active.drop_lon], { icon: padIcon(PAD.drop, 'D') })
+        .bindTooltip(`Drop-off · ArUco 1 · job ${active.id}`).addTo(jobPins);
+    L.polyline([[active.pickup_lat, active.pickup_lon], [active.drop_lat, active.drop_lon], ORIGIN],
+        { color: '#ffffff', weight: 1.5, opacity: .45, dashArray: '6 6' }).addTo(jobPins);
+}
 
-    body.innerHTML = drones.map((d, i) => {
-        const colour = COLOURS[i % COLOURS.length];
-        // A drone marked BUSY with no live mission behind it is the signature
-        // of the bug this release fixes, so it is called out explicitly rather
-        // than looking identical to a drone that is flying.
+function refreshObstacles() {
+    fetch('/map/obstacles').then(r => r.json()).then(data => {
+        obstacleLayer.clearLayers();
+        (data.obstacles || []).forEach(o => {
+            L.circle([o.lat, o.lon], {
+                radius: o.radius_m || 3, color: ST.critical, weight: 2,
+                fillColor: ST.critical, fillOpacity: 0.12 + 0.3 * (o.confidence || 0),
+            }).bindTooltip(`Obstacle (${esc(o.obstacle_type || 'unknown')})<br>
+                reported by ${esc(o.source_drone)} · confidence ${fmt(o.confidence * 100, 0)}%`)
+              .addTo(obstacleLayer);
+        });
+    }).catch(() => {});
+}
+refreshObstacles();
+setInterval(refreshObstacles, 5000);
+
+// ══════════════════════════════════════════════════════════════════════════
+//  Fleet data
+// ══════════════════════════════════════════════════════════════════════════
+function position(d, live) {
+    // Live mission state first (in-process, updated every socket tick); the
+    // database row otherwise, which keeps the last known fix after landing.
+    if (live && live.live && live.lat) return { lat: live.lat, lon: live.lon, alt: live.alt };
+    if (d.lat) return { lat: d.lat, lon: d.lon, alt: d.alt };
+    return null;
+}
+
+function render(data) {
+    lastPayload = data;
+    const drones = data.drones || [];
+    const live = data.live || {};
+
+    if (!$('droneTabs').childElementCount) buildTabs(drones.map(d => d.id));
+
+    const flying = drones.filter(d => d.status === 'BUSY').length;
+    $('fleetSummary').textContent = `${flying}/${drones.length} flying` + (data.queued ? ` · ${data.queued} queued` : '');
+
+    $('fleetRows').innerHTML = drones.length ? drones.map(d => {
+        const l = live[d.id] || {};
+        const p = position(d, l);
         const orphaned = d.status === 'BUSY' && !d.mission_live;
         return `<tr>
-            <td><span style="color:${colour}">●</span> ${d.id}</td>
-            <td><span class="pill s-${d.status}">${d.status}</span>
-                ${orphaned ? '<span class="reason"> BUSY with no live mission</span>' : ''}</td>
-            <td class="detail">${d.current_job_id || '—'}</td>
-            <td class="detail">${fmt(d.lat, 6)}, ${fmt(d.lon, 6)}</td>
-            <td class="detail">${fmt(d.alt, 1)} m</td>
-            <td class="detail">${d.battery_pct === null ? '—' : fmt(d.battery_pct, 0) + '%'}</td>
-            <td class="detail">${d.detail || ''}</td>
+            <td><span style="color:${droneColour(d.id)}">●</span> <b>${esc(d.id)}</b></td>
+            <td><span class="pill s-${esc(d.status)}">${esc(d.status)}</span>
+                ${orphaned ? '<div class="reason">BUSY with no live mission</div>' : ''}</td>
+            <td class="detail">${l.live ? esc(l.fsm_state) : '—'}</td>
+            <td class="detail num">${p ? fmt(p.lat, 6) + ', ' + fmt(p.lon, 6) : '—'}</td>
+            <td class="detail num">${p ? fmt(p.alt, 1) + ' m' : '—'}</td>
+            <td class="detail num">${d.battery_pct == null ? '—' : fmt(l.battery_pct ?? d.battery_pct, 0) + '%'}</td>
+            <td class="detail">${esc(l.live ? l.status : d.detail)}</td>
+            <td>${d.mission_live && d.current_job_id
+                ? `<button class="danger" onclick="abortJob('${esc(d.current_job_id)}')">Abort</button>` : ''}</td>
         </tr>`;
-    }).join('');
+    }).join('') : '<tr><td colspan="8" class="detail">no drones registered</td></tr>';
 
-    drones.forEach((d, i) => {
-        if (!d.lat || !d.lon) return;              // 0,0 means "no fix yet"
-        const colour = COLOURS[i % COLOURS.length];
-        const point = [d.lat, d.lon];
+    drones.forEach(d => {
+        const l = live[d.id] || {};
+        const p = position(d, l);
+        if (!p) return;
+        const point = [p.lat, p.lon];
+        const heading = l.heading_deg ?? lastHeading[d.id] ?? 0;
+        lastHeading[d.id] = heading;
         if (!markers[d.id]) {
-            markers[d.id] = L.marker(point, { icon: droneIcon(colour), zIndexOffset: 1000 })
-                .addTo(map).bindPopup(d.id);
-            trails[d.id] = L.polyline([point], { color: colour, weight: 2, opacity: 0.65 })
-                .addTo(map);
+            markers[d.id] = L.marker(point, { icon: droneIcon(droneColour(d.id), heading), zIndexOffset: 1000 })
+                .addTo(map).on('click', () => selectDrone(d.id));
+            trails[d.id] = L.polyline([point], { color: droneColour(d.id), weight: 3, opacity: 0.8 }).addTo(map);
         } else {
             markers[d.id].setLatLng(point);
-            trails[d.id].addLatLng(point);
+            const svg = markers[d.id].getElement()?.querySelector('svg');
+            if (svg) svg.style.transform = `rotate(${heading}deg)`;
+            const pts = trails[d.id].getLatLngs();
+            const last = pts[pts.length - 1];
+            if (!last || last.lat !== p.lat || last.lng !== p.lon) trails[d.id].addLatLng(point);
+            if (pts.length > 4000) trails[d.id].setLatLngs(pts.slice(-3000));
         }
-        markers[d.id].setPopupContent(
-            `<b>${d.id}</b><br>${d.status}<br>${fmt(d.alt, 1)} m<br>${d.detail || ''}`);
+        markers[d.id].bindTooltip(`<b>${esc(d.id)}</b> · ${esc(l.live ? l.fsm_state : d.status)}<br>
+            ${fmt(p.alt, 1)} m${l.action ? ' · avoider ' + esc(l.action) : ''}`, { direction: 'top', offset: [0, -16] });
+        if (follow && d.id === selected) map.panTo(point, { animate: true });
     });
-}
 
-function renderJobs(jobs) {
-    const body = document.getElementById('jobRows');
-    if (!jobs.length) {
-        body.innerHTML = '<tr><td colspan="4" class="detail">none yet</td></tr>';
-        return;
-    }
-    body.innerHTML = jobs.map(j => {
+    const jobs = data.recent_jobs || [];
+    drawJobPins(jobs);
+    $('jobRows').innerHTML = jobs.length ? jobs.map(j => {
         const bad = ['FAILED', 'ABORTED'].includes(j.status);
         return `<tr>
-            <td class="detail">${j.id}</td>
-            <td><span class="pill s-${j.status}">${j.status}</span></td>
-            <td class="detail">${j.assigned_drone || '—'}</td>
-            <td class="${bad ? 'reason' : 'detail'}">${j.detail || ''}</td>
+            <td class="detail num">${esc(j.id)}</td>
+            <td><span class="pill s-${esc(j.status)}">${esc(j.status)}</span></td>
+            <td class="detail">${esc(j.assigned_drone || '—')}</td>
+            <td class="${bad ? 'reason' : 'detail'}">${esc(j.detail || '')}</td>
         </tr>`;
-    }).join('');
+    }).join('') : '<tr><td colspan="4" class="detail">none yet</td></tr>';
+
+    const failed = jobs.find(j => ['FAILED', 'ABORTED'].includes(j.status) && j.detail);
+    showBanner(failed && jobs[0] === failed ? `Last job failed (${failed.id}): ${failed.detail}` : '');
+
+    renderTelemetry();
 }
 
-// One fleet-wide socket. The old page opened /ws and streamed a module-level
-// drone_state dict — the same globals that made a fleet impossible.
-let socket;
+function renderTelemetry() {
+    if (!lastPayload) return;
+    const d = (lastPayload.drones || []).find(x => x.id === selected) || {};
+    const l = (lastPayload.live || {})[selected] || {};
+    const p = position(d, l);
+    $('tFsm').textContent = l.live ? l.fsm_state : (d.status || '—');
+    $('tAlt').innerHTML = p ? `${fmt(p.alt, 1)}<small>m</small>` : '—';
+    $('tHdg').innerHTML = l.heading_deg != null ? `${fmt(l.heading_deg, 0)}<small>°</small>` : '—';
+    const bat = l.battery_pct ?? d.battery_pct;
+    $('tBat').innerHTML = bat != null ? `${fmt(bat, 0)}<small>%</small>` : '—';
+    $('tMarkers').textContent = l.live ? ((l.markers_visible || []).length
+        ? (l.markers_visible || []).slice().sort((a, b) => a - b).join(', ') : 'none') : '—';
+}
+
+// One socket for the whole fleet, with a polling fallback. A dead socket looks
+// exactly like a fleet that has stopped moving, so the link state is always
+// shown in the header -- and if the socket never opens at all (the server
+// once had no websocket library and answered 404), poll instead of freezing.
+let socketOpened = false, pollTimer = null, wsFailures = 0;
+function setLink(kind, text) {
+    $('linkChip').className = 'chip ' + kind;
+    $('linkChip').innerHTML = `<span class="dot"></span><span>${esc(text)}</span>`;
+}
+function startPolling() {
+    if (pollTimer) return;
+    const tick = () => fetch('/fleet/live').then(r => r.json())
+        .then(data => { render(data); setLink('good', 'Live · polling'); })
+        .catch(() => setLink('critical', 'Dispatcher unreachable'));
+    tick();
+    pollTimer = setInterval(tick, 1000);
+}
 function connect() {
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-    socket = new WebSocket(`${scheme}://${location.host}/ws`);
-
-    socket.onmessage = event => {
-        const data = JSON.parse(event.data);
-        renderFleet(data.drones || []);
-        renderJobs(data.recent_jobs || []);
-
-        const drones = data.drones || [];
-        const busy = drones.filter(d => d.status === 'BUSY').length;
-        document.getElementById('fleetSummary').textContent =
-            `${busy}/${drones.length} flying` + (data.queued ? `, ${data.queued} queued` : '');
-
-        const failed = (data.recent_jobs || []).find(
-            j => ['FAILED', 'ABORTED'].includes(j.status) && j.detail);
-        showBanner(failed ? `Last failure (${failed.id}): ${failed.detail}` : '');
+    const socket = new WebSocket(`${scheme}://${location.host}/ws`);
+    socket.onopen = () => {
+        socketOpened = true; wsFailures = 0;
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        setLink('good', 'Live · websocket');
     };
-
-    // Reconnect rather than silently freezing: a dead socket looks exactly like
-    // a fleet that has stopped moving.
+    socket.onmessage = event => render(JSON.parse(event.data));
     socket.onclose = () => {
-        document.getElementById('fleetSummary').textContent = 'reconnecting…';
-        setTimeout(connect, 2000);
+        wsFailures += 1;
+        if (!socketOpened || wsFailures >= 2) startPolling();
+        else setLink('warning', 'Reconnecting…');
+        setTimeout(connect, Math.min(10000, 2000 * wsFailures));
     };
 }
 connect();
+
+// ══════════════════════════════════════════════════════════════════════════
+//  Drone selection
+// ══════════════════════════════════════════════════════════════════════════
+function buildTabs(ids) {
+    const all = Array.from(new Set([...Object.keys(STREAMS), ...ids]));
+    $('droneTabs').innerHTML = all.map(id =>
+        `<button data-drone="${esc(id)}"><span style="color:${droneColour(id)}">●</span> ${esc(id)}</button>`).join('');
+    $('droneTabs').querySelectorAll('button').forEach(b => b.onclick = () => selectDrone(b.dataset.drone));
+    $('droneTabs').style.display = all.length > 1 ? 'flex' : 'none';
+    markActiveTab();
+}
+function markActiveTab() {
+    $('droneTabs').querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.drone === selected));
+}
+function selectDrone(id) {
+    if (!STREAMS[id]) return;
+    selected = id;
+    markActiveTab();
+    startCamera();
+    startLidar();
+    renderTelemetry();
+}
+
+document.querySelectorAll('[data-fullscreen]').forEach(btn => btn.onclick = () => {
+    const el = $(btn.dataset.fullscreen);
+    if (document.fullscreenElement) document.exitFullscreen(); else el.requestFullscreen?.();
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+//  Camera: MJPEG from the vision bridge, health from its snapshot endpoint
+// ══════════════════════════════════════════════════════════════════════════
+let camTimer = null;
+function setCam(kind, text) {
+    $('camChip').className = 'chip ' + kind;
+    $('camChip').innerHTML = `<span class="dot"></span><span>${esc(text)}</span>`;
+}
+function startCamera() {
+    const port = STREAMS[selected].camera;
+    const url = feedUrl(port, '/stream.mjpg');
+    $('camSub').textContent = selected;
+    $('camOfflineUrl').textContent = url;
+    $('camImg').src = url + '?t=' + Date.now();
+    $('camImg').onerror = () => $('camWrap').classList.add('down');
+    if (camTimer) clearInterval(camTimer);
+    const check = () => fetch(feedUrl(port, '/snapshot.json'), { cache: 'no-store' })
+        .then(r => r.json())
+        .then(s => {
+            if ($('camWrap').classList.contains('down')) {          // bridge came back: reconnect
+                $('camWrap').classList.remove('down');
+                $('camImg').src = url + '?t=' + Date.now();
+            }
+            if (s.stale || s.age_s > 2) {
+                setCam('critical', 'No signal');
+                $('tFps').textContent = s.age_s ? `silent ${fmt(s.age_s, 0)} s` : 'no frames';
+            } else {
+                setCam('good', 'Live');
+                $('tFps').innerHTML = `${fmt(s.fps, 1)}<small>fps</small>`;
+            }
+        })
+        .catch(() => {
+            $('camWrap').classList.add('down');
+            $('camOfflineWhy').textContent = 'The vision bridge is not running for this drone.';
+            setCam('critical', 'Offline');
+            $('tFps').textContent = 'offline';
+        });
+    check();
+    camTimer = setInterval(check, 2000);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  LiDAR: Server-Sent Events from the avoider
+// ══════════════════════════════════════════════════════════════════════════
+const ICON = {
+    check: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M3 8.5l3.2 3L13 4.5"/></svg>',
+    left: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M13 13V8a3 3 0 00-3-3H3m3.5-3.5L3 5l3.5 3.5"/></svg>',
+    right: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M3 13V8a3 3 0 013-3h7M9.5 1.5L13 5 9.5 8.5"/></svg>',
+    warn: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M8 1.8L15 14H1z"/><path d="M8 6.2v3.6M8 11.6v.4"/></svg>',
+    off: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg>',
+};
+const ACTIONS = {
+    CLEAR:       { cls: 'st-good', icon: ICON.check, text: 'PATH CLEAR' },
+    DODGE_LEFT:  { cls: 'st-warning', icon: ICON.left, text: 'DODGING LEFT' },
+    DODGE_RIGHT: { cls: 'st-warning', icon: ICON.right, text: 'DODGING RIGHT' },
+    ESCALATE:    { cls: 'st-critical blink', icon: ICON.warn, text: 'ESCALATED · REPLANNING' },
+    OFFLINE:     { cls: 'st-critical blink', icon: ICON.off, text: 'AVOIDER OFFLINE' },
+    STALE:       { cls: 'st-serious', icon: ICON.warn, text: 'NO SCANS' },
+};
+
+let lidarSource = null, lidarWatchdog = null, lastScan = null, lidarState = 'OFFLINE';
+const history = [];            // [{t: ms, front: m}]
+const events = [];             // transitions seen live, merged with the server's
+const HISTORY_MS = 60000;
+
+function setAction(key) {
+    lidarState = key;
+    const a = ACTIONS[key] || ACTIONS.STALE;
+    $('actionBadge').className = 'status ' + a.cls;
+    $('actionBadge').innerHTML = a.icon + `<span>${a.text}</span>`;
+}
+
+function startLidar() {
+    if (lidarSource) lidarSource.close();
+    lastScan = null; history.length = 0; events.length = 0;
+    setAction('OFFLINE');
+    drawRadar(); drawSpark(); renderEvents();
+    const url = feedUrl(STREAMS[selected].lidar, '/events');
+    lidarSource = new EventSource(url);
+    lidarSource.onmessage = e => {
+        const msg = JSON.parse(e.data);
+        clearTimeout(lidarWatchdog);
+        lidarWatchdog = setTimeout(() => { setAction('OFFLINE'); drawRadar(); }, 2500);
+        if (msg.stale) { setAction(msg.age_s == null ? 'STALE' : 'OFFLINE'); drawRadar(); return; }
+        onScan(msg);
+    };
+    lidarSource.onerror = () => { setAction('OFFLINE'); drawRadar(); };
+}
+
+function sectorClass(v, lim) {
+    return v < lim.safe_m ? 'b-critical' : v < lim.clear_m ? 'b-warning' : 'b-good';
+}
+
+function onScan(s) {
+    lastScan = s;
+    setAction(s.action);
+    const lim = s.limits;
+    $('lgSafe').textContent = `${lim.safe_m} m`;
+    $('lgClear').textContent = `${lim.clear_m} m`;
+    [['secL', s.med_left_m], ['secF', s.eff_front_m], ['secR', s.med_right_m]].forEach(([id, v]) => {
+        $(id).className = 'sector ' + sectorClass(v, lim);
+        $(id).querySelector('.v').innerHTML = v >= 14.99 ? 'open' : `${fmt(v, 1)}<small> m</small>`;
+    });
+
+    const dodging = s.action !== 'CLEAR';
+    $('dodgeBar').classList.toggle('on', dodging);
+    if (dodging) {
+        $('dodgeTxt').textContent = `Dodging for ${fmt(s.dodge_age_s, 1)} s`;
+        $('dodgeLimit').textContent = `replans at ${lim.escalate_after_s} s`;
+        $('dodgeFill').style.width = Math.min(100, 100 * s.dodge_age_s / lim.escalate_after_s) + '%';
+        $('dodgeFill').style.background = s.action === 'ESCALATE' ? ST.critical : ST.warning;
+    }
+
+    const now = Date.now();
+    history.push({ t: now, front: s.eff_front_m });
+    while (history.length && now - history[0].t > HISTORY_MS) history.shift();
+
+    (s.transitions || []).forEach(tr => {
+        if (!events.some(e => Math.abs(e.wall - tr.wall) < 0.01 && e.to === tr.to)) events.push(tr);
+    });
+    events.sort((a, b) => b.wall - a.wall);
+    events.length = Math.min(events.length, 30);
+
+    drawRadar(); drawSpark(); renderEvents();
+}
+
+function renderEvents() {
+    if (!events.length) {
+        $('events').innerHTML = '<li><span class="t">—</span><span class="detail">no transitions yet</span><span></span></li>';
+        return;
+    }
+    $('events').innerHTML = events.map(e => {
+        const a = ACTIONS[e.to] || ACTIONS.STALE;
+        const colour = a.cls.includes('good') ? ST.good : a.cls.includes('warning') ? ST.warning : ST.critical;
+        const t = new Date(e.wall * 1000).toLocaleTimeString([], { hour12: false });
+        return `<li><span class="t num">${t}</span>
+            <span><span style="color:${colour}">●</span> ${esc(e.from)} → <b>${esc(e.to)}</b></span>
+            <span class="detail num">front ${fmt(e.front_m, 1)} m</span></li>`;
+    }).join('');
+}
+
+// ── radar ─────────────────────────────────────────────────────────────────
+function cssPx(canvas) {
+    // Draw at device resolution so lines stay sharp on HiDPI screens.
+    const r = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    return { w, h, dpr };
+}
+
+function drawRadar() {
+    const c = $('radar');
+    const { w, h, dpr } = cssPx(c);
+    const g = c.getContext('2d');
+    g.clearRect(0, 0, w, h);
+    const cx = w / 2, cy = h / 2;
+    const R = Math.min(w, h) / 2 - 22 * dpr;
+    const s = lastScan;
+    const lim = s ? s.limits : { safe_m: 6.5, clear_m: 9, front_half_deg: 35, side_start_deg: 40, side_end_deg: 100, self_hit_m: 0.5 };
+    const rmax = s ? s.range_max : 12;
+    const k = R / rmax;
+    // Scan angles are CCW-positive from straight ahead; forward is up, left is left.
+    const P = (a, r) => [cx - Math.sin(a) * r * k, cy - Math.cos(a) * r * k];
+    const deg = d => d * Math.PI / 180;
+    const offline = lidarState === 'OFFLINE' || lidarState === 'STALE';
+
+    // backdrop
+    g.fillStyle = '#16191d';
+    g.beginPath(); g.arc(cx, cy, R, 0, 2 * Math.PI); g.fill();
+
+    // sectors: front cone (tinted by state), left/right side sectors
+    const sector = (a0, a1, fill) => {
+        g.beginPath(); g.moveTo(cx, cy);
+        g.arc(cx, cy, R, -Math.PI / 2 - a1, -Math.PI / 2 - a0);
+        g.closePath(); g.fillStyle = fill; g.fill();
+    };
+    const tint = !s || offline ? 'rgba(133,140,148,.10)'
+        : s.action === 'CLEAR' ? 'rgba(12,163,12,.12)'
+        : s.action === 'ESCALATE' ? 'rgba(208,59,59,.20)' : 'rgba(250,178,25,.16)';
+    sector(deg(-lim.front_half_deg), deg(lim.front_half_deg), tint);
+    sector(deg(lim.side_start_deg), deg(lim.side_end_deg), 'rgba(255,255,255,.035)');
+    sector(deg(-lim.side_end_deg), deg(-lim.side_start_deg), 'rgba(255,255,255,.035)');
+
+    // range rings, recessive, labelled every 2 m
+    g.lineWidth = 1 * dpr; g.font = `${11 * dpr}px system-ui, sans-serif`;
+    for (let m = 2; m <= rmax; m += 2) {
+        g.strokeStyle = 'rgba(255,255,255,.08)';
+        g.beginPath(); g.arc(cx, cy, m * k, 0, 2 * Math.PI); g.stroke();
+        g.fillStyle = '#6d747c'; g.fillText(`${m} m`, cx + 4 * dpr, cy - m * k + 12 * dpr);
+    }
+    g.strokeStyle = 'rgba(255,255,255,.06)';
+    g.beginPath(); g.moveTo(cx - R, cy); g.lineTo(cx + R, cy); g.moveTo(cx, cy - R); g.lineTo(cx, cy + R); g.stroke();
+
+    // threshold rings
+    const ring = (m, colour, label) => {
+        g.setLineDash([6 * dpr, 5 * dpr]); g.strokeStyle = colour; g.lineWidth = 1.6 * dpr;
+        g.beginPath(); g.arc(cx, cy, m * k, 0, 2 * Math.PI); g.stroke(); g.setLineDash([]);
+        const [lx, ly] = P(deg(-50), m);
+        g.fillStyle = colour; g.font = `600 ${11 * dpr}px system-ui, sans-serif`;
+        g.fillText(label, lx + 4 * dpr, ly);
+    };
+    ring(lim.safe_m, 'rgba(208,59,59,.85)', `safe ${lim.safe_m} m`);
+    ring(lim.clear_m, 'rgba(12,163,12,.75)', `clear ${lim.clear_m} m`);
+
+    if (s && !offline) {
+        // free-space polygon: how far the beam got in each direction
+        g.beginPath();
+        s.ranges.forEach((r, i) => {
+            const a = s.angle_min + i * s.angle_increment;
+            const d = (r == null || r < lim.self_hit_m) ? rmax : Math.min(r, rmax);
+            const [x, y] = P(a, d);
+            i ? g.lineTo(x, y) : g.moveTo(x, y);
+        });
+        g.closePath();
+        g.fillStyle = 'rgba(57,135,229,.10)'; g.fill();
+        g.strokeStyle = 'rgba(57,135,229,.35)'; g.lineWidth = 1 * dpr; g.stroke();
+
+        // returns, coloured by how close they are
+        s.ranges.forEach((r, i) => {
+            if (r == null || r < lim.self_hit_m || r >= rmax) return;
+            const a = s.angle_min + i * s.angle_increment;
+            const [x, y] = P(a, r);
+            g.fillStyle = r < lim.safe_m ? ST.critical : r < lim.clear_m ? ST.warning : '#8fb6e8';
+            g.beginPath(); g.arc(x, y, (r < lim.safe_m ? 3.4 : 2.4) * dpr, 0, 2 * Math.PI); g.fill();
+        });
+
+        // dodge intent arrow
+        if (s.action === 'DODGE_LEFT' || s.action === 'DODGE_RIGHT') {
+            const side = s.action === 'DODGE_LEFT' ? 1 : -1;
+            g.strokeStyle = ST.warning; g.fillStyle = ST.warning; g.lineWidth = 4 * dpr; g.lineCap = 'round';
+            const r0 = 2.6 * k;
+            g.beginPath(); g.arc(cx, cy, r0, -Math.PI / 2, -Math.PI / 2 - side * 1.1, side > 0); g.stroke();
+            const ang = -Math.PI / 2 - side * 1.1;
+            const tx = cx + Math.cos(ang) * r0, ty = cy + Math.sin(ang) * r0;
+            g.beginPath();
+            g.moveTo(tx - side * 9 * dpr, ty - 4 * dpr); g.lineTo(tx + 3 * dpr * side, ty + 9 * dpr); g.lineTo(tx - side * 11 * dpr, ty + 9 * dpr);
+            g.closePath(); g.fill();
+        }
+    }
+
+    // the drone
+    g.save(); g.translate(cx, cy);
+    g.fillStyle = '#ffffff';
+    g.beginPath(); g.moveTo(0, -11 * dpr); g.lineTo(8 * dpr, 8 * dpr); g.lineTo(0, 4 * dpr); g.lineTo(-8 * dpr, 8 * dpr); g.closePath(); g.fill();
+    g.restore();
+    g.fillStyle = '#b4bac1'; g.font = `700 ${11 * dpr}px system-ui, sans-serif`; g.textAlign = 'center';
+    g.fillText('FORWARD', cx, cy - R - 7 * dpr);
+    g.textAlign = 'left';
+
+    if (offline) {
+        g.fillStyle = 'rgba(19,21,24,.72)';
+        g.beginPath(); g.arc(cx, cy, R, 0, 2 * Math.PI); g.fill();
+        g.textAlign = 'center';
+        g.fillStyle = '#f07070'; g.font = `800 ${17 * dpr}px system-ui, sans-serif`;
+        g.fillText(lidarState === 'STALE' ? 'NO SCANS' : 'AVOIDER OFFLINE', cx, cy - 6 * dpr);
+        g.fillStyle = '#b4bac1'; g.font = `${12 * dpr}px system-ui, sans-serif`;
+        g.fillText('A flying drone holds position until the feed returns', cx, cy + 16 * dpr);
+        g.textAlign = 'left';
+    }
+}
+
+// ── front-clearance sparkline (one series, one axis) ──────────────────────
+function drawSpark(hoverX) {
+    const c = $('spark');
+    const { w, h, dpr } = cssPx(c);
+    const g = c.getContext('2d');
+    g.clearRect(0, 0, w, h);
+    const pad = { l: 26 * dpr, r: 6 * dpr, t: 6 * dpr, b: 14 * dpr };
+    const ymax = 15, now = Date.now();
+    const X = t => pad.l + (w - pad.l - pad.r) * (1 - (now - t) / HISTORY_MS);
+    const Y = v => pad.t + (h - pad.t - pad.b) * (1 - Math.min(v, ymax) / ymax);
+    const lim = lastScan ? lastScan.limits : { safe_m: 6.5, clear_m: 9 };
+
+    g.font = `${10 * dpr}px system-ui, sans-serif`; g.fillStyle = '#6d747c';
+    [0, 5, 10, 15].forEach(v => {
+        g.strokeStyle = 'rgba(255,255,255,.06)'; g.lineWidth = 1 * dpr;
+        g.beginPath(); g.moveTo(pad.l, Y(v)); g.lineTo(w - pad.r, Y(v)); g.stroke();
+        g.fillText(String(v), 4 * dpr, Y(v) + 3 * dpr);
+    });
+    g.fillText('-60 s', pad.l, h - 2 * dpr);
+    g.textAlign = 'right'; g.fillText('now', w - pad.r, h - 2 * dpr); g.textAlign = 'left';
+
+    [[lim.safe_m, 'rgba(208,59,59,.8)'], [lim.clear_m, 'rgba(12,163,12,.7)']].forEach(([v, col]) => {
+        g.setLineDash([4 * dpr, 4 * dpr]); g.strokeStyle = col; g.lineWidth = 1 * dpr;
+        g.beginPath(); g.moveTo(pad.l, Y(v)); g.lineTo(w - pad.r, Y(v)); g.stroke(); g.setLineDash([]);
+    });
+
+    if (history.length > 1) {
+        g.beginPath();
+        history.forEach((p, i) => i ? g.lineTo(X(p.t), Y(p.front)) : g.moveTo(X(p.t), Y(p.front)));
+        g.strokeStyle = '#3987e5'; g.lineWidth = 2 * dpr; g.lineJoin = 'round'; g.stroke();
+    }
+
+    const tip = $('sparkTip');
+    if (hoverX != null && history.length) {
+        const x = hoverX * dpr;
+        let best = history[0];
+        history.forEach(p => { if (Math.abs(X(p.t) - x) < Math.abs(X(best.t) - x)) best = p; });
+        const bx = X(best.t), by = Y(best.front);
+        g.strokeStyle = 'rgba(255,255,255,.35)'; g.lineWidth = 1 * dpr;
+        g.beginPath(); g.moveTo(bx, pad.t); g.lineTo(bx, h - pad.b); g.stroke();
+        g.fillStyle = '#3987e5'; g.strokeStyle = '#202429'; g.lineWidth = 2 * dpr;
+        g.beginPath(); g.arc(bx, by, 4.5 * dpr, 0, 2 * Math.PI); g.fill(); g.stroke();
+        tip.style.display = 'block';
+        tip.textContent = `${fmt((best.t - now) / 1000, 1)} s · front ${best.front >= 14.99 ? 'open' : fmt(best.front, 1) + ' m'}`;
+        const left = Math.min(bx / dpr + 10, c.clientWidth - tip.offsetWidth);
+        tip.style.left = left + 'px'; tip.style.top = (14 + by / dpr - 28) + 'px';
+    } else {
+        tip.style.display = 'none';
+    }
+}
+let sparkHover = null;
+$('spark').addEventListener('mousemove', e => { sparkHover = e.offsetX; drawSpark(sparkHover); });
+$('spark').addEventListener('mouseleave', () => { sparkHover = null; drawSpark(); });
+setInterval(() => drawSpark(sparkHover), 500);       // keep the time axis moving when idle
+window.addEventListener('resize', () => { drawRadar(); drawSpark(); });
+document.addEventListener('fullscreenchange', () => setTimeout(() => { drawRadar(); drawSpark(); }, 50));
+
+selectDrone(selected);
 </script>
 </body>
 </html>

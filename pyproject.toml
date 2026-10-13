@@ -19,6 +19,10 @@ requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.104",
     "uvicorn>=0.24",
+    # uvicorn ships WITHOUT a websocket implementation. Missing, it logs one
+    # warning, answers every /ws upgrade with 404, and the dashboard sits on
+    # "connecting..." with no drone on the map. fleet_dispatch/app.py's /ws.
+    "websockets>=12",
     "pydantic>=2.0",
     "jinja2>=3.1",
     # PINNED DELIBERATELY: Battery.remaining_percent is 0-100 in MAVSDK 2.x and
@@ -55,6 +59,7 @@ packages = [
     "drone_web",
     "fleet_dispatch",
     "global_planner",
+    "livefeed",
     "obstacle_memory_service",
     "perception",
     "world",

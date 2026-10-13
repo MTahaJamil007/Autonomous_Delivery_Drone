@@ -45,6 +45,16 @@ WHAT CHANGED AND WHY
    change that moves the front cone somewhere other than the front is a loud
    startup failure rather than a subtly wrong flight.
 
+7. Transition logging can no longer kill the node. It used one rclpy call
+   site at two severities, which rclpy rejects with a ValueError -- so the
+   avoider died the first time a dodge ended and the drone hovered until its
+   leg timed out. See log_transition().
+
+8. The latest scan and decision are served over HTTP for the dashboard's LiDAR
+   view (livefeed, config.lidar_view_port). The callback only hands a reference
+   to the server; serialising and sending happen on the server's own threads,
+   so a slow or stalled browser cannot delay a decision.
+
 Usage:
     python3 avoider_node.py --drone-id drone-0
     python3 avoider_node.py --drone-id drone-1 --scan-topic /drone_1/scan
@@ -61,6 +71,7 @@ import sys
 import time
 
 import config
+from livefeed.server import Latest, LiveFeedServer
 
 logger = logging.getLogger("avoider")
 
@@ -326,6 +337,89 @@ def validate_scan_geometry(
     return problems
 
 
+def log_transition(
+    log,
+    previous: str,
+    action: str,
+    eff_front: float,
+    med_left: float,
+    med_right: float,
+    dodge_age_s: float,
+) -> None:
+    """Log one action change, at a severity that matches its seriousness.
+
+    ONE CALL SITE PER SEVERITY, AND IT MUST STAY THAT WAY. rclpy's logger keys
+    its per-call-site context on (function, file, line, bytecode offset) and
+    raises `ValueError: Logger severity cannot be changed between calls` if the
+    same call site is ever used at a second severity. This used to pick a bound
+    method (`error`/`warning`/`info`) into a variable and call it from a single
+    line, so the first transition (CLEAR -> DODGE_LEFT, at WARN) fixed that
+    line's severity and the next one (DODGE_LEFT -> CLEAR, at INFO) raised.
+
+    The exception escaped the scan callback, rclpy.spin() re-raised it, and the
+    avoider process exited the moment the drone cleared its first obstacle. The
+    mission saw the obstacle feed go silent and -- correctly -- held position
+    rather than fly blind, until the 600 s leg timeout. So the drone avoided the
+    obstacle perfectly, then hovered motionless for ten minutes.
+
+    tests/test_avoider_node.py drives this function through every transition
+    against a logger that enforces the same rule.
+    """
+    message = (
+        f"{previous} -> {action} | front={eff_front:.1f}m "
+        f"left={med_left:.1f}m right={med_right:.1f}m "
+        f"dodge_age={dodge_age_s:.1f}s"
+    )
+    if action == ESCALATE:
+        log.error(message)
+    elif action != CLEAR:
+        log.warning(message)
+    else:
+        log.info(message)
+
+
+VIEW_TRANSITIONS = 12
+"""How many recent action changes the dashboard's LiDAR view can show."""
+
+
+def render_scan_view(scan: dict, age_s: float) -> dict:
+    """The dashboard's view of one scan: the decision, the geometry, the thresholds.
+
+    Pure, and run on a viewer thread rather than in the scan callback. Ranges
+    are rounded to centimetres and non-finite returns become null -- json.dumps
+    would otherwise emit `Infinity`, which is not JSON and which the browser's
+    JSON.parse rejects, taking the whole view down on an empty sky.
+    """
+    ranges = [
+        round(value, 2) if math.isfinite(value) and value > 0.0 else None
+        for value in scan["ranges"]
+    ]
+    return {
+        "drone_id": scan["drone_id"],
+        "seq": scan["seq"],
+        "age_s": round(age_s, 2),
+        "action": scan["action"],
+        "eff_front_m": scan["eff_front_m"],
+        "med_left_m": scan["med_left_m"],
+        "med_right_m": scan["med_right_m"],
+        "dodge_age_s": scan["dodge_age_s"],
+        "angle_min": scan["angle_min"],
+        "angle_increment": scan["angle_increment"],
+        "range_max": scan["range_max"] or config.LIDAR_RANGE_MAX_M,
+        "ranges": ranges,
+        "transitions": list(scan.get("transitions", [])),
+        "limits": {
+            "safe_m": config.SAFE_DIST,
+            "clear_m": config.CLEAR_DIST,
+            "self_hit_m": config.MIN_VALID_RANGE_M,
+            "front_half_deg": config.FRONT_HALF_DEG,
+            "side_start_deg": config.SIDE_START_DEG,
+            "side_end_deg": config.SIDE_END_DEG,
+            "escalate_after_s": config.ESCALATION_LOCK_S,
+        },
+    }
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  ROS NODE
 # ═════════════════════════════════════════════════════════════════════════════
@@ -363,6 +457,17 @@ def build_node_class():
             self._last_action = CLEAR
 
             self.create_subscription(LaserScan, scan_topic, self._on_scan, 10)
+
+            # Dashboard LiDAR view. The callback only publishes a reference;
+            # everything else happens on the server's threads. See livefeed.
+            self._live = Latest()
+            self._transitions: list[dict] = []
+            self._view = LiveFeedServer(
+                f"lidar[{drone_id}]", config.LIVEFEED_HOST, config.lidar_view_port(drone_id)
+            )
+            self._view.route_sse("/events", self._live, self._render_view)
+            self._view.route_json("/snapshot.json", self._snapshot_view)
+            self._view.start()
 
             self.get_logger().info(
                 f"avoider up: {drone_id} | scan={scan_topic} | "
@@ -439,21 +544,49 @@ def build_node_class():
             # Log transitions only. At 10 Hz, logging every scan buries the
             # events that matter -- and with three drones it is unreadable.
             if action != self._last_action:
-                level = (
-                    self.get_logger().error
-                    if action == ESCALATE
-                    else self.get_logger().warning
-                    if action != CLEAR
-                    else self.get_logger().info
+                log_transition(
+                    self.get_logger(),
+                    self._last_action,
+                    action,
+                    eff_front,
+                    med_left,
+                    med_right,
+                    dodge_age_s,
                 )
-                level(
-                    f"{self._last_action} -> {action} | front={eff_front:.1f}m "
-                    f"left={med_left:.1f}m right={med_right:.1f}m "
-                    f"dodge_age={dodge_age_s:.1f}s"
-                )
+                self._transitions = [
+                    *self._transitions[-(VIEW_TRANSITIONS - 1) :],
+                    {
+                        "wall": time.time(),
+                        "from": self._last_action,
+                        "to": action,
+                        "front_m": round(eff_front, 2),
+                    },
+                ]
                 self._last_action = action
 
+            self._live.publish(
+                {
+                    **payload,
+                    "ranges": msg.ranges,
+                    "angle_min": msg.angle_min,
+                    "angle_increment": msg.angle_increment,
+                    "range_max": msg.range_max,
+                    "transitions": self._transitions,
+                }
+            )
+
+        def _render_view(self, scan: dict, age_s: float) -> dict:
+            """One SSE message for the dashboard. Runs on a viewer thread."""
+            return render_scan_view(scan, age_s)
+
+        def _snapshot_view(self) -> dict:
+            _seq, scan, published_at = self._live.get()
+            if scan is None:
+                return {"stale": True, "age_s": None}
+            return render_scan_view(scan, time.monotonic() - published_at)
+
         def destroy_node(self) -> bool:
+            self._view.close()
             self._sock.close()
             return super().destroy_node()
 

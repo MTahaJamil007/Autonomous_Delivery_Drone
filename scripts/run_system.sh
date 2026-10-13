@@ -80,7 +80,7 @@ live_recorded_processes() {
         case "$cmdline" in
             *"$PROJECT_ROOT"* | *obstacle_memory* | *fleet_dispatch* \
             | *perception.vision_bridge* | *avoider_node* \
-            | *ros_gz_bridge* | *parameter_bridge*)
+            | *ros_gz_bridge* | *parameter_bridge* | *respawn.sh*)
                 printf '  %-26s pid %s\n' "${name:-?}" "$pid"
                 ;;
         esac
@@ -146,8 +146,12 @@ for i in $(seq 0 $((FLEET_SIZE - 1))); do
     mapfile -t bridge_args < <(python3 -m sim_topics --drone-id "$drone_id" --what bridge-args | tr ' ' '\n')
     start "ros_gz_bridge_$i" "${bridge_args[@]}"
 
-    start "vision_$i"  python3 -m perception.vision_bridge --drone-id "$drone_id" --headless
-    start "avoider_$i" python3 avoider_node.py --drone-id "$drone_id"
+    # Under respawn.sh: a crashed avoider used to stay dead, and the drone held
+    # position on the silent feed until its leg timed out (see respawn.sh).
+    start "vision_$i"  "$SCRIPT_DIR/respawn.sh" "vision_$i" \
+        python3 -m perception.vision_bridge --drone-id "$drone_id" --headless
+    start "avoider_$i" "$SCRIPT_DIR/respawn.sh" "avoider_$i" \
+        python3 avoider_node.py --drone-id "$drone_id"
 done
 
 # ── Verify ───────────────────────────────────────────────────────────────────
@@ -169,7 +173,8 @@ $(for i in $(seq 0 $((FLEET_SIZE - 1))); do
     python3 - "$i" <<'PY'
 import sys, config
 i = int(sys.argv[1]); d = f"drone-{i}"
-print(f"  {d}: mavlink {config.mavsdk_port(d)}  vision {config.vision_port(d)}  lidar {config.lidar_port(d)}")
+print(f"  {d}: mavlink {config.mavsdk_port(d)}  vision {config.vision_port(d)}  lidar {config.lidar_port(d)}"
+      f"  camera view {config.camera_stream_port(d)}  lidar view {config.lidar_view_port(d)}")
 PY
 done)
 

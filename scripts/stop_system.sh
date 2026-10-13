@@ -30,6 +30,7 @@ fi
 
 # Sweep. Patterns are specific enough not to match an editor or a grep.
 for pattern in \
+    'scripts/respawn.sh' \
     'perception.vision_bridge' \
     'avoider_node.py' \
     'ros_gz_bridge' \

@@ -176,7 +176,11 @@ class DroneMission:
             "battery_pct": self.drone_state.get("battery_pct"),
             "status": self.drone_state.get("status", ""),
             "fsm_state": self.fsm.state.value,
+            "heading_deg": self.drone_state.get("heading_deg"),
+            "armed": self.drone_state.get("armed", False),
+            "landing_phase": self.drone_state.get("landing_phase"),
             "action": self.lidar_data.get("action"),
+            "eff_front_m": self.lidar_data.get("eff_front_m"),
             "markers_visible": [d.get("id") for d in self.vision_data.get("detections", [])],
             "live": True,
             "elapsed_s": round(time.monotonic() - self._started_at, 1) if self._started_at else 0.0,
@@ -407,7 +411,10 @@ class DroneMission:
         await self._supervisor.upload_geofence()
         self._spawn_task(self._supervisor.supervise(), "supervisor")
 
-        self._payload = PayloadBay(self.drone_id, self.home_lat, self.home_lon)
+        # The world origin, not home: the cargo is placed in Gazebo's frame.
+        self._payload = PayloadBay(
+            self.drone_id, config.GZ_WORLD_ORIGIN_LAT, config.GZ_WORLD_ORIGIN_LON
+        )
 
         await self._prefetch_obstacles(job)
         await self._spawn_pads(job)
@@ -459,12 +466,13 @@ class DroneMission:
         }
 
         for role, (lat, lon) in targets.items():
+            # Relative to the WORLD origin, not home: see config.GZ_WORLD_ORIGIN_LAT.
             ok = await gz_client.spawn_pad_at_gps(
                 role,
                 lat,
                 lon,
-                self.home_lat,
-                self.home_lon,
+                config.GZ_WORLD_ORIGIN_LAT,
+                config.GZ_WORLD_ORIGIN_LON,
                 name_prefix=f"{self.drone_id}_",
             )
             if not ok:

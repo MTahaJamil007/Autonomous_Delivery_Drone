@@ -10,6 +10,8 @@
 
 fastapi>=0.104.0
 uvicorn>=0.24.0
+# Without it uvicorn answers the dashboard's /ws with 404 (see pyproject.toml).
+websockets>=12
 pydantic>=2.0.0
 jinja2>=3.1.0
 
